@@ -12,4 +12,7 @@ dependencies {
     implementation(project(':lib:streamtapeextractor'))
     implementation(project(':lib:mixdropextractor'))
     implementation(project(':lib:vidguardextractor'))
+    implementation(project(':lib:voeextractor'))
+    implementation(project(':lib:pixeldrainextractor'))
+    implementation(project(':lib:playlistutils'))
 }
