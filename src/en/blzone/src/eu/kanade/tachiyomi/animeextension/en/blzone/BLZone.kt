@@ -4,8 +4,11 @@ import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.mixdropextractor.MixDropExtractor
+import aniyomi.lib.pixeldrainextractor.PixelDrainExtractor
+import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.streamtapeextractor.StreamTapeExtractor
 import aniyomi.lib.vidguardextractor.VidGuardExtractor
+import aniyomi.lib.voeextractor.VoeExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -22,11 +25,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 class BLZone :
@@ -38,12 +43,15 @@ class BLZone :
     override val lang = "en"
     override val supportsLatest = true
 
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
+
     private val preferences by getPreferencesLazy()
 
     companion object {
         private const val PREF_SERVER_KEY = "preferred_server"
         private const val PREF_SERVER_DEFAULT = "Filemoon"
-        private val SERVER_LIST = arrayOf("Filemoon", "StreamTape", "MixDrop", "VidGuard")
+        private val SERVER_LIST = arrayOf("Filemoon", "StreamTape", "MixDrop", "VidGuard", "Voe", "PixelDrain")
     }
 
     // ---- FILTERS ----
@@ -70,23 +78,30 @@ class BLZone :
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
-        val animeList = mutableListOf<SAnime>()
-        animeList.addAll(
-            document.select("#dt-tvshows .item.tvshows, #dt-movies .item.tvshows")
-                .map { popularAnimeFromElement(it) },
-        )
+        val animeList = document.select("#dt-tvshows .item.tvshows, #dt-movies .item.tvshows, #dt-animes .item.tvshows, #dt-doramas .item.tvshows")
+            .map { popularAnimeFromElement(it) }
         return AnimesPage(animeList, hasNextPage = false)
     }
 
     private fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
         val poster = element.selectFirst(".poster")
-        val link = poster?.selectFirst("a")?.attr("href")!!
-        val img = poster.selectFirst("img")
-        anime.title = img?.attr("alt") ?: element.selectFirst("h3 a")?.text() ?: "No title"
-        anime.thumbnail_url = img?.attr("src")
+        val link = poster?.selectFirst("a")?.attr("href") ?: element.selectFirst("h3 a")?.attr("href")!!
+        val img = poster?.selectFirst("img") ?: element.selectFirst("img")
+        anime.title = img?.attr("alt")?.takeIf { it.isNotBlank() }
+            ?: element.selectFirst("h3 a")?.text()
+            ?: "No title"
+        anime.thumbnail_url = img?.let { getImageUrl(it) }
         anime.setUrlWithoutDomain(link)
         return anime
+    }
+
+    private fun getImageUrl(element: Element): String? = when {
+        element.hasAttr("data-src") -> element.attr("abs:data-src")
+        element.hasAttr("data-lazy-src") -> element.attr("abs:data-lazy-src")
+        element.hasAttr("data-original") -> element.attr("abs:data-original")
+        element.hasAttr("srcset") -> element.attr("abs:srcset").substringBefore(" ")
+        else -> element.attr("abs:src")
     }
 
     // ---- LATEST ----
@@ -97,15 +112,15 @@ class BLZone :
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.asJsoup()
-        val animeList = document.select(".items.full .item.tvshows")
+        val animeList = document.select(".items.full .item.tvshows, .items .item.tvshows")
             .map { latestAnimeFromElement(it) }.toMutableList()
 
         if (response.request.url.encodedPath.endsWith("/anime/")) {
             runCatching {
                 client.newCall(GET("$baseUrl/dorama/", headers)).execute()
-                    .use { response ->
-                        response.asJsoup()
-                            .select(".items.full .item.tvshows")
+                    .use { resp ->
+                        resp.asJsoup()
+                            .select(".items.full .item.tvshows, .items .item.tvshows")
                             .map { latestAnimeFromElement(it) }
                             .let { animeList.addAll(it) }
                     }
@@ -116,7 +131,9 @@ class BLZone :
 
     private fun latestAnimeFromElement(element: Element): SAnime = popularAnimeFromElement(element)
 
-    private fun hasNextPage(document: Document): Boolean = document.selectFirst(".pagination .next:not(.disabled)") != null
+    private fun hasNextPage(document: Document): Boolean {
+        return document.selectFirst(".pagination span.current + a, .pagination a.inactive, .pagination .next:not(.disabled), .pagination a.arrow_pag") != null
+    }
 
     // ---- SEARCH ----
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
@@ -127,6 +144,11 @@ class BLZone :
                     addPathSegment(typeFilter.toUriPart())
                     addPathSegment("")
                 }
+                if (page > 1) {
+                    addPathSegment("page")
+                    addPathSegment(page.toString())
+                    addPathSegment("")
+                }
                 addQueryParameter("s", query.trim())
             }
             .build()
@@ -135,16 +157,19 @@ class BLZone :
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
-        val animeList = document.select(".search-page .result-item article").map { searchAnimeFromElement(it) }
-        return AnimesPage(animeList, hasNextPage = false)
+        val animeList = document.select(".search-page .result-item article, .result-item article, .items.full .item.tvshows")
+            .map { searchAnimeFromElement(it) }
+        return AnimesPage(animeList, hasNextPage = hasNextPage(document))
     }
 
     private fun searchAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
-        val img = element.selectFirst(".thumbnail img")
-        val link = element.selectFirst(".thumbnail a")?.attr("href")!!
-        anime.title = img?.attr("alt") ?: element.selectFirst(".title a")?.text() ?: "No title"
-        anime.thumbnail_url = img?.attr("src")
+        val img = element.selectFirst(".thumbnail img, .image img, .poster img")
+        val link = element.selectFirst(".thumbnail a, .image a, .title a, .poster a")?.attr("href")!!
+        anime.title = img?.attr("alt")?.takeIf { it.isNotBlank() }
+            ?: element.selectFirst(".title a, h3 a")?.text()
+            ?: "No title"
+        anime.thumbnail_url = img?.let { getImageUrl(it) }
         anime.setUrlWithoutDomain(link)
         return anime
     }
@@ -157,11 +182,11 @@ class BLZone :
         (document.selectFirst(".sheader .data h1")?.text() ?: poster?.attr("alt"))?.let {
             anime.title = it
         }
-        anime.thumbnail_url = poster?.attr("src")
-        anime.genre = document.select(".sheader .sgeneros a").joinToString { it.text() }
+        anime.thumbnail_url = poster?.let { getImageUrl(it) }
+        anime.genre = document.select(".sheader .sgeneros a").joinToString { it.text().trim() }
         val desc = document.selectFirst(".sbox .wp-content p")?.text()
             ?.takeIf { it.isNotBlank() }
-        val altTitle = document.selectFirst(".custom_fields b.variante:contains(Original Title) + span.valor")?.text()
+        val altTitle = document.selectFirst(".custom_fields b.variante:contains(Original Title) + span.valor, .custom_fields b.variante:contains(Original Title) + span")?.text()
             ?.takeIf { it.isNotBlank() }
         anime.description = listOfNotNull(desc, altTitle)
             .joinToString("\n\n")
@@ -172,17 +197,23 @@ class BLZone :
     // ---- EPISODES ----
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.asJsoup()
-        return document.select("#episodes ul.episodios2 > li").map { episodeFromElement(it) }.reversed()
+        val episodes = document.select("#episodes ul.episodios2 > li, #episodes ul.episodios > li, #seasons ul.episodios > li, ul.episodios2 > li, ul.episodios > li")
+        return episodes.map { episodeFromElement(it) }.reversed()
     }
 
     private val episodeNumRegex = Regex("""Episode (\d+)""", RegexOption.IGNORE_CASE)
 
     private fun episodeFromElement(element: Element): SEpisode {
         val ep = SEpisode.create()
-        val link = element.selectFirst(".episodiotitle a")?.attr("href")!!
+        val titleEl = element.selectFirst(".episodiotitle a")
+        val link = titleEl?.attr("href")
+            ?: element.selectFirst(".imagen a, a")?.attr("href")!!
         ep.setUrlWithoutDomain(link)
-        ep.name = element.selectFirst(".episodiotitle a")?.text() ?: "Episode"
+        ep.name = titleEl?.text()?.trim()
+            ?: element.selectFirst(".numerando")?.text()?.trim()
+            ?: "Episode"
         val episodeNum = episodeNumRegex.find(ep.name)?.groupValues?.getOrNull(1)
+            ?: element.selectFirst(".numerando")?.text()?.filter { it.isDigit() }
         episodeNum?.toFloatOrNull()?.let { ep.episode_number = it }
         return ep
     }
@@ -192,6 +223,9 @@ class BLZone :
     private val streamtapeExtractor by lazy { StreamTapeExtractor(client) }
     private val mixDropExtractor by lazy { MixDropExtractor(client) }
     private val vidGuardExtractor by lazy { VidGuardExtractor(client) }
+    private val voeExtractor by lazy { VoeExtractor(client, headers) }
+    private val pixelDrainExtractor by lazy { PixelDrainExtractor() }
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
     // ---- VIDEO LIST PARSE ----
     override fun videoListParse(response: Response): List<Video> {
@@ -200,32 +234,32 @@ class BLZone :
         val serverBoxes = document.select(".dooplay_player .source-box").drop(1)
 
         return serverBoxes.mapIndexedNotNull { index, box ->
-            val matchedServerName = serverNames.getOrNull(index)?.let { serverName ->
-                SERVER_LIST.firstOrNull { serverName.contains(it, ignoreCase = true) }
-            } ?: return@mapIndexedNotNull null
-
-            val iframe = box.selectFirst("iframe.metaframe")
+            val serverLabel = serverNames.getOrNull(index)?.ifBlank { null } ?: "Server ${index + 1}"
+            val iframe = box.selectFirst("iframe.metaframe, iframe")
             val src = iframe?.attr("src")?.trim().orEmpty()
             if (src.isBlank()) return@mapIndexedNotNull null
+
             val videoUrl = if (src.contains("/diclaimer/?url=")) {
-                java.net.URLDecoder.decode(src.substringAfter("/diclaimer/?url="), StandardCharsets.UTF_8.name())
+                runCatching {
+                    URLDecoder.decode(src.substringAfter("/diclaimer/?url="), StandardCharsets.UTF_8.name())
+                }.getOrDefault(src)
             } else {
                 src
             }
-            Video(videoUrl, matchedServerName, videoUrl)
+            Video(videoUrl, serverLabel, videoUrl)
         }
     }
 
     // ---- GET VIDEO LIST ----
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val response = client.newCall(GET(baseUrl + episode.url)).await()
+        val response = client.newCall(GET(baseUrl + episode.url, headers)).await()
         val videos = videoListParse(response)
 
         return coroutineScope {
             videos.map { video ->
                 async(Dispatchers.IO) {
                     try {
-                        serverVideoResolver(video.url)
+                        serverVideoResolver(video.url, video.quality)
                     } catch (e: Exception) {
                         emptyList()
                     }
@@ -234,12 +268,16 @@ class BLZone :
         }
     }
 
-    private fun serverVideoResolver(url: String): List<Video> = when {
+    private fun serverVideoResolver(url: String, serverName: String): List<Video> = when {
         url.contains("filemoon") -> filemoonExtractor.videosFromUrl(url, "FileMoon")
         url.contains("streamtape") -> streamtapeExtractor.videosFromUrl(url, "StreamTape")
         url.contains("mixdrop") -> mixDropExtractor.videosFromUrl(url, "MixDrop")
-        url.contains("vgembed") -> vidGuardExtractor.videosFromUrl(url, "VidGuard")
-        else -> emptyList()
+        url.contains("voe.sx") || url.contains("/e/") && serverName.contains("voe", ignoreCase = true) -> voeExtractor.videosFromUrl(url)
+        url.contains("pixeldrain") || serverName.contains("pixel", ignoreCase = true) -> pixelDrainExtractor.videosFromUrl(url)
+        url.contains("vgembed") || url.contains("byseqekaho") || url.contains("vidguard") || serverName.contains("byse", ignoreCase = true) || serverName.contains("vidguard", ignoreCase = true) -> vidGuardExtractor.videosFromUrl(url)
+        url.contains(".m3u8") -> playlistUtils.extractFromHls(url, videoNameGen = { "$serverName: $it" })
+        url.contains(".mp4") -> listOf(Video(url, "$serverName: MP4", url))
+        else -> listOf(Video(url, serverName, url))
     }
 
     override fun List<Video>.sort(): List<Video> {
