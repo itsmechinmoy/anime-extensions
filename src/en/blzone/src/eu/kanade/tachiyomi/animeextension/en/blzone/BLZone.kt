@@ -272,7 +272,7 @@ class BLZone :
         url.contains("filemoon") -> filemoonExtractor.videosFromUrl(url, "FileMoon")
         url.contains("streamtape") -> streamtapeExtractor.videosFromUrl(url, "StreamTape")
         url.contains("mixdrop") -> mixDropExtractor.videosFromUrl(url, "MixDrop")
-        url.contains("voe.sx") || url.contains("/e/") && serverName.contains("voe", ignoreCase = true) -> voeExtractor.videosFromUrl(url)
+        url.contains("voe.sx") || (url.contains("/e/") && serverName.contains("voe", ignoreCase = true)) -> voeExtractor.videosFromUrl(url)
         url.contains("pixeldrain") || serverName.contains("pixel", ignoreCase = true) -> pixelDrainExtractor.videosFromUrl(url)
         url.contains("vgembed") || url.contains("byseqekaho") || url.contains("vidguard") || serverName.contains("byse", ignoreCase = true) || serverName.contains("vidguard", ignoreCase = true) -> vidGuardExtractor.videosFromUrl(url)
         url.contains(".m3u8") -> playlistUtils.extractFromHls(url, videoNameGen = { "$serverName: $it" })
