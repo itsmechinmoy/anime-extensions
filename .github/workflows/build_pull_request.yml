@@ -115,14 +115,67 @@ jobs:
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: "github.repository == 'yuzono/anime-extensions'"
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: "**/*.apk"
-          retention-days: 1
+          retention-days: 7
 
       - name: Clean up CI files
         run: rm signingkey.jks
+
+  comment_apk:
+    name: Post APK Download Link
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Post or Update PR Comment with nightly.link
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const repo = context.repo;
+            const runId = context.runId;
+            const prNumber = context.issue.number;
+            const commitSha = context.sha ? context.sha.substring(0, 7) : '';
+
+            const nightlyLink = `https://nightly.link/${repo.owner}/${repo.repo}/actions/runs/${runId}`;
+
+            const commentHeader = `### 📦 Test APK Artifacts Available`;
+            const commentBody = `${commentHeader}\n\n` +
+              `The extension APKs compiled for this PR (commit \`${commitSha}\`) can be downloaded directly:\n\n` +
+              `👉 **[Download APKs via nightly.link](${nightlyLink})**\n\n` +
+              `> *Extract the downloaded \`.zip\` and install the \`.apk\` on your Android device to test in Dantotsu / Aniyomi.*`;
+
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                ...repo,
+                issue_number: prNumber,
+              });
+
+              const botComment = comments.find(c =>
+                c.user.type === 'Bot' && c.body.includes(commentHeader)
+              );
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  ...repo,
+                  comment_id: botComment.id,
+                  body: commentBody,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...repo,
+                  issue_number: prNumber,
+                  body: commentBody,
+                });
+              }
+            } catch (error) {
+              console.log('Unable to post/update comment: ' + error.message);
+            }
 
   publish:
     name: Check extension repo
