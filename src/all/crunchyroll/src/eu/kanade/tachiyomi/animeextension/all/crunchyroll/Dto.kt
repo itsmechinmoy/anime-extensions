@@ -66,6 +66,8 @@ class ContentItemDto(
     private val images: ImagesDto? = null,
     @SerialName("series_metadata") private val seriesMetadata: SeriesMetadataDto? = null,
 ) {
+    val seasonCount get() = seriesMetadata?.seasonCount ?: 0
+
     fun toSAnime(): SAnime = SAnime.create().apply {
         url = id
         title = this@ContentItemDto.title
@@ -120,14 +122,26 @@ class SeasonDto(
     @SerialName("season_number") val seasonNumber: Int = 0,
     @SerialName("season_display_number") val seasonDisplayNumber: String = "",
     @SerialName("audio_locale") val audioLocale: String = "",
+    @SerialName("number_of_episodes") val episodeCount: Int = 0,
+    private val images: ImagesDto? = null,
     val versions: List<VersionDto> = emptyList(),
 ) {
+    // Season titles carry the dub in a trailing parenthesis - "Hanako-kun 2 (English
+    // Dub)" - which stops them lining up with the tracker's own season titles.
+    val cleanTitle: String get() = title.replace(DUB_SUFFIX, "").trim()
+
+    val thumbnail: String? get() = with(ImageDto) {
+        images?.posterTall.best() ?: images?.posterWide.best()
+    }
+
     // A season's own audio_locale is the account's preferred audio, not what
     // exists; the other dubs are sibling seasons in versions.
     fun guidFor(audioLocale: String): String = versions.firstOrNull { it.audioLocale == audioLocale }?.guid
         ?: versions.firstOrNull { it.original }?.guid
         ?: id
 }
+
+private val DUB_SUFFIX = Regex("""\s*\([^)]*\bdub\b[^)]*\)""", RegexOption.IGNORE_CASE)
 
 @Serializable
 class SeasonsResponseDto(val data: List<SeasonDto> = emptyList())
@@ -165,13 +179,19 @@ class EpisodeDto(
 
     val date: String? get() = uploadDate ?: airDate
 
-    fun toSEpisode(seasonLabel: String, dateMillis: Long, audioLocale: String): SEpisode = SEpisode.create().apply {
+    fun toSEpisode(
+        seasonLabel: String,
+        dateMillis: Long,
+        audioLocale: String,
+        numberOffset: Float = 0f,
+    ): SEpisode = SEpisode.create().apply {
         url = guidFor(audioLocale)
-        episode_number = episodeNumber ?: sequenceNumber
+        episode_number = (episodeNumber ?: sequenceNumber) + numberOffset
         date_upload = dateMillis
         name = buildString {
             if (seasonLabel.isNotEmpty()) append("$seasonLabel ")
-            append(if (episode.isNotEmpty()) "Ep. $episode" else "Ep. ${episode_number.toString().removeSuffix(".0")}")
+            val own = episodeNumber ?: sequenceNumber
+            append(if (episode.isNotEmpty()) "Ep. $episode" else "Ep. ${own.toString().removeSuffix(".0")}")
             if (title.isNotEmpty()) append(" - $title")
             if (availabilityStatus == "premium_only") append(" 🔒")
         }

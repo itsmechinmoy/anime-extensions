@@ -14,7 +14,7 @@ import eu.kanade.tachiyomi.network.POST
 import keiyoushi.utils.Source
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
+import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
@@ -246,22 +246,78 @@ class Crunchyroll : Source() {
 
         val data = client.newCall(GET(url, headers)).execute().parseAs<SearchResponseDto>()
         val items = data.data.firstOrNull { it.type == "series" }?.items.orEmpty()
-        return AnimesPage(items.map { it.toSAnime() }, items.size >= PAGE_SIZE)
+
+        // Crunchyroll keeps sequels as seasons of one series while trackers list them
+        // as separate titles, so a multi-season series is offered one entry per season
+        // - otherwise both titles map here and their episode numbers collide.
+        val entries = items.parallelCatchingMapNotNull { item ->
+            if (item.seasonCount > 1) seasonEntries(item) else listOf(item.toSAnime())
+        }.flatten()
+
+        return AnimesPage(entries, items.size >= PAGE_SIZE)
+    }
+
+    private fun seasonEntries(item: ContentItemDto): List<SAnime> {
+        val seasonsUrl = "$baseUrl/content/v2/cms/series/${item.id}/seasons?locale=$contentLocale"
+        val seasons = runCatching {
+            client.newCall(GET(seasonsUrl, headers)).execute().parseAs<SeasonsResponseDto>().data
+        }.getOrNull().orEmpty().distinctBy { it.seasonNumber to it.seasonDisplayNumber }
+
+        if (seasons.size < 2) return listOf(item.toSAnime())
+
+        val series = item.toSAnime()
+        return seasons.sortedBy { it.seasonNumber }.map { season ->
+            SAnime.create().apply {
+                url = "$SEASON_PREFIX${season.guidFor(audioLocale)}:${item.id}"
+                title = season.cleanTitle.ifEmpty { "${series.title} S${season.seasonNumber}" }
+                thumbnail_url = season.thumbnail ?: series.thumbnail_url
+                description = series.description
+                genre = series.genre
+                status = series.status
+                initialized = true
+            }
+        }
     }
 
     // =========================== Anime Details ============================
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
-        val url = "$baseUrl/content/v2/cms/series/${anime.url}?locale=$contentLocale"
+        val url = "$baseUrl/content/v2/cms/series/${anime.seriesId}?locale=$contentLocale"
         val data = client.newCall(GET(url, headers)).execute().parseAs<BrowseResponseDto>()
-        return data.data.firstOrNull()?.toSAnime() ?: anime
+        val series = data.data.firstOrNull()?.toSAnime() ?: return anime
+        // A season entry has its own title and artwork; only the blurb is shared.
+        if (anime.seasonId == null) return series
+        return anime.apply {
+            description = series.description
+            genre = series.genre
+            status = series.status
+            initialized = true
+        }
     }
 
-    override fun getAnimeUrl(anime: SAnime) = "$baseUrl/series/${anime.url}"
+    override fun getAnimeUrl(anime: SAnime) = "$baseUrl/series/${anime.seriesId}"
+
+    /** Season entries are stored as `season:<seasonId>:<seriesId>`. */
+    private val SAnime.seasonId: String?
+        get() = url.takeIf { it.startsWith(SEASON_PREFIX) }
+            ?.removePrefix(SEASON_PREFIX)?.substringBefore(':')
+
+    private val SAnime.seriesId: String
+        get() = if (url.startsWith(SEASON_PREFIX)) url.substringAfterLast(':') else url
 
     // ============================== Episodes ==============================
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        // A season entry maps 1:1 onto a tracker season, so its episodes keep the
+        // numbering the tracker expects and need no season label.
+        anime.seasonId?.let { seasonId ->
+            val url = "$baseUrl/content/v2/cms/seasons/$seasonId/episodes?locale=$contentLocale"
+            return client.newCall(GET(url, headers)).execute()
+                .parseAs<EpisodesResponseDto>().data
+                .map { it.toSEpisode("", dateFormat.tryParse(it.date), audioLocale) }
+                .reversed()
+        }
+
         val seasonsUrl = "$baseUrl/content/v2/cms/series/${anime.url}/seasons?locale=$contentLocale"
         val seasons = client.newCall(GET(seasonsUrl, headers)).execute()
             .parseAs<SeasonsResponseDto>().data
@@ -269,19 +325,30 @@ class Crunchyroll : Source() {
         // A series can list the same season once per audio locale.
         val wanted = seasons.distinctBy { it.seasonNumber to it.seasonDisplayNumber }
 
-        return wanted.parallelCatchingFlatMapBlocking { season ->
-            val seasonId = season.guidFor(audioLocale)
-            val url = "$baseUrl/content/v2/cms/seasons/$seasonId/episodes?locale=$contentLocale"
-            val episodes = client.newCall(GET(url, headers)).execute()
-                .parseAs<EpisodesResponseDto>().data
+        val bySeason = wanted.sortedBy { it.seasonNumber }
+            .parallelCatchingMapNotNull { season ->
+                val seasonId = season.guidFor(audioLocale)
+                val url = "$baseUrl/content/v2/cms/seasons/$seasonId/episodes?locale=$contentLocale"
+                season to client.newCall(GET(url, headers)).execute()
+                    .parseAs<EpisodesResponseDto>().data
+            }
+            .sortedBy { (season, _) -> season.seasonNumber }
 
-            val label = if (wanted.size > 1) {
+        // Every season restarts at episode 1, so numbering them as they come makes
+        // season 2 collide with season 1 and the app keeps only one of each pair.
+        // Offsetting by the episodes already listed keeps them distinct and ordered.
+        var offset = 0f
+        return bySeason.flatMap { (season, episodes) ->
+            val label = if (bySeason.size > 1) {
                 "S${season.seasonDisplayNumber.ifEmpty { season.seasonNumber.toString() }}"
             } else {
                 ""
             }
-
-            episodes.map { it.toSEpisode(label, dateFormat.tryParse(it.date), audioLocale) }
+            val numbered = episodes.map {
+                it.toSEpisode(label, dateFormat.tryParse(it.date), audioLocale, offset)
+            }
+            offset += episodes.size
+            numbered
         }.reversed()
     }
 
@@ -561,6 +628,8 @@ class Crunchyroll : Source() {
 
         // The only download profile that mints Widevine licenses; switch returns OMA.
         private const val DOWNLOAD_PROFILE = "android/phone"
+
+        private const val SEASON_PREFIX = "season:"
 
         private const val DEVICE_NAME = "Firefox on Windows"
         private const val DEVICE_TYPE = "Firefox on Windows"

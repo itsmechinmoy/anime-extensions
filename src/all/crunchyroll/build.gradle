@@ -1,7 +1,7 @@
 ext {
     extName = 'Crunchyroll'
     extClass = '.Crunchyroll'
-    extVersionCode = 14
+    extVersionCode = 16
     isNsfw = false
 }
 
