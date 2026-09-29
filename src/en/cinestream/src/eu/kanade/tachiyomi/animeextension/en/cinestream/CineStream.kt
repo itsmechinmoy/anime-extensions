@@ -104,22 +104,26 @@ class CineStream :
         filters: AnimeFilterList,
     ): AnimesPage = coroutineScope {
         if (query.isNotBlank()) {
+            val skip = (page - 1) * PAGE_SIZE
             val encQuery = URLEncoder.encode(query.trim(), "UTF-8")
             val endpoints = listOf(
-                "https://v3-cinemeta.strem.io/catalog/movie/top/search=$encQuery.json",
-                "https://v3-cinemeta.strem.io/catalog/series/top/search=$encQuery.json",
-                "https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-airing/search=$encQuery.json",
+                "https://v3-cinemeta.strem.io/catalog/movie/top/skip=$skip&search=$encQuery.json",
+                "https://v3-cinemeta.strem.io/catalog/series/top/skip=$skip&search=$encQuery.json",
+                "https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-airing/skip=$skip&search=$encQuery.json",
             )
 
             val tasks = endpoints.map { ep ->
                 async {
                     runCatching {
-                        client.get(ep, headers).parseAs<CinemetaCatalogResponse>().metas
-                    }.getOrDefault(emptyList())
+                        client.get(ep, headers).parseAs<CinemetaCatalogResponse>()
+                    }.getOrNull()
                 }
             }
 
-            val results = tasks.awaitAll()
+            val responses = tasks.awaitAll().filterNotNull()
+            val results = responses.map { it.metas }
+            val hasMore = responses.any { it.metas.size >= PAGE_SIZE }
+
             val interleaved = buildList {
                 val maxSize = results.maxOfOrNull { it.size } ?: 0
                 for (i in 0 until maxSize) {
@@ -136,7 +140,7 @@ class CineStream :
                     this.thumbnail_url = media.poster
                 }
             }
-            return@coroutineScope AnimesPage(animeList, false)
+            return@coroutineScope AnimesPage(animeList, hasMore)
         }
 
         // Browse / Filter query
@@ -208,8 +212,14 @@ class CineStream :
 
     override fun getAnimeUrl(anime: SAnime): String {
         val parts = anime.url.split("/", limit = 2)
+        val type = parts.firstOrNull() ?: "movie"
         val id = parts.getOrNull(1) ?: anime.url
-        return if (id.startsWith("tt")) "https://www.imdb.com/title/$id" else "https://v3-cinemeta.strem.io/meta/${anime.url}.json"
+        val metaHost = if (type == "anime" || id.startsWith("kitsu")) {
+            "anime-kitsu.strem.fun"
+        } else {
+            "v3-cinemeta.strem.io"
+        }
+        return if (id.startsWith("tt")) "https://www.imdb.com/title/$id" else "https://$metaHost/meta/${anime.url}.json"
     }
 
     override fun animeDetailsRequest(anime: SAnime): Request = throw UnsupportedOperationException()
@@ -379,7 +389,7 @@ class CineStream :
         val qualityRank = listOf("2160p", "4k", "1080p", "720p", "480p", "360p")
 
         val sorted = rawVideos.sortedWith(
-            compareByDescending<Video> { it.videoTitle.contains(prefQual, ignoreCase = true) }
+            compareByDescending<Video> { it.videoTitle.replace("4k", "2160", ignoreCase = true).contains(prefQual, ignoreCase = true) }
                 .thenBy { v ->
                     val idx = qualityRank.indexOfFirst { v.videoTitle.contains(it, ignoreCase = true) }
                     if (idx == -1) qualityRank.size else idx
