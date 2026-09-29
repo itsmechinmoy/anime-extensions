@@ -91,6 +91,7 @@ data class MediaPayload(
     val isAsian: Boolean = false,
     val isCartoon: Boolean = false,
     val imdbId: String? = null,
+    val epImdbId: String? = null,
     val imdbSeason: Int? = null,
     val imdbEpisode: Int? = null,
     val isKitsu: Boolean = false,
