@@ -1,0 +1,13 @@
+ext {
+    extName = 'CineStream'
+    extClass = '.CineStream'
+    libVersion = 16
+    extVersionCode = 1
+}
+
+apply plugin: "kei.plugins.extension.legacy"
+
+dependencies {
+    implementation(project(':lib:playlistutils'))
+    implementation(project(':lib:cryptoaes'))
+}
