@@ -6,6 +6,7 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.FetchType
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
@@ -17,11 +18,10 @@ import keiyoushi.utils.addSwitchPreference
 import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -43,12 +43,6 @@ class CineStream :
     private val preferences: SharedPreferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
     private val preferredQuality: String
         get() = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
 
@@ -63,7 +57,7 @@ class CineStream :
     override suspend fun getPopularAnime(page: Int): AnimesPage {
         val skip = (page - 1) * PAGE_SIZE
         val url = "https://cinemeta-catalogs.strem.io/top/catalog/movie/top/skip=$skip.json"
-        val resp = client.get(url, headers).parseAs<CinemetaCatalogResponse>()
+        val resp = client.get(url).parseAs<CinemetaCatalogResponse>()
         val animeList = resp.metas.map { media ->
             SAnime.create().apply {
                 this.url = "${media.type}/${media.id}"
@@ -82,7 +76,7 @@ class CineStream :
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
         val skip = (page - 1) * PAGE_SIZE
         val url = "https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-airing/skip=$skip.json"
-        val resp = client.get(url, headers).parseAs<CinemetaCatalogResponse>()
+        val resp = client.get(url).parseAs<CinemetaCatalogResponse>()
         val animeList = resp.metas.map { media ->
             SAnime.create().apply {
                 this.url = "anime/${media.id}"
@@ -115,7 +109,7 @@ class CineStream :
             val tasks = endpoints.map { ep ->
                 async {
                     runCatching {
-                        client.get(ep, headers).parseAs<CinemetaCatalogResponse>()
+                        client.get(ep).parseAs<CinemetaCatalogResponse>()
                     }.getOrNull()
                 }
             }
@@ -158,7 +152,7 @@ class CineStream :
             append(".json")
         }
 
-        val resp = client.get(url, headers).parseAs<CinemetaCatalogResponse>()
+        val resp = client.get(url).parseAs<CinemetaCatalogResponse>()
         val animeList = resp.metas.map { media ->
             SAnime.create().apply {
                 this.url = "${media.type}/${media.id}"
@@ -177,7 +171,7 @@ class CineStream :
     // ============================== Details ===============================
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
-        val parts = anime.url.split("/", limit = 2)
+        val parts = anime.url.split("/", limit = 3)
         val type = parts.firstOrNull() ?: "movie"
         val id = parts.getOrNull(1) ?: anime.url
 
@@ -188,7 +182,7 @@ class CineStream :
             "https://v3-cinemeta.strem.io/meta/$type/$id.json"
         }
 
-        val metaResp = client.get(metaUrl, headers).parseAs<CinemetaMetaDetailResponse>()
+        val metaResp = client.get(metaUrl).parseAs<CinemetaMetaDetailResponse>()
         val meta = metaResp.meta ?: return anime
 
         val genres = meta.genres ?: meta.genre
@@ -207,11 +201,12 @@ class CineStream :
                 meta.status?.equals("ended", true) == true || meta.status?.equals("completed", true) == true -> SAnime.COMPLETED
                 else -> SAnime.ONGOING
             }
+            fetch_type = if (type == "movie") FetchType.Episodes else FetchType.Seasons
         }
     }
 
     override fun getAnimeUrl(anime: SAnime): String {
-        val parts = anime.url.split("/", limit = 2)
+        val parts = anime.url.split("/", limit = 3)
         val type = parts.firstOrNull() ?: "movie"
         val id = parts.getOrNull(1) ?: anime.url
         val metaHost = if (type == "anime" || id.startsWith("kitsu")) {
@@ -225,12 +220,51 @@ class CineStream :
     override fun animeDetailsRequest(anime: SAnime): Request = throw UnsupportedOperationException()
     override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
 
+    // ============================== Seasons ===============================
+
+    override suspend fun getSeasonList(anime: SAnime): List<SAnime> {
+        val parts = anime.url.split("/", limit = 3)
+        val type = parts.firstOrNull() ?: "series"
+        val id = parts.getOrNull(1) ?: anime.url
+
+        val isKitsu = id.startsWith("kitsu") || type == "anime"
+        val metaUrl = if (isKitsu) {
+            "https://anime-kitsu.strem.fun/meta/$type/${id.replace(":", "%3A")}.json"
+        } else {
+            "https://v3-cinemeta.strem.io/meta/$type/$id.json"
+        }
+
+        val metaResp = client.get(metaUrl).parseAs<CinemetaMetaDetailResponse>()
+        val meta = metaResp.meta ?: return emptyList()
+        val videos = meta.videos.orEmpty().filter { it.season != 0 }
+        val seasons = videos.map { it.season }.distinct().sorted()
+
+        if (seasons.isEmpty()) return emptyList()
+
+        return seasons.map { seasonNum ->
+            SAnime.create().apply {
+                title = "${meta.name ?: anime.title} Season $seasonNum"
+                url = "$type/$id/$seasonNum"
+                thumbnail_url = meta.poster ?: anime.thumbnail_url
+                genre = anime.genre
+                description = anime.description
+                status = anime.status
+                season_number = seasonNum.toDouble()
+                fetch_type = FetchType.Episodes
+            }
+        }
+    }
+
+    override fun seasonListRequest(anime: SAnime): Request = throw UnsupportedOperationException()
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
     // ============================== Episodes ==============================
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val parts = anime.url.split("/", limit = 2)
+        val parts = anime.url.split("/", limit = 3)
         val type = parts.firstOrNull() ?: "movie"
         val id = parts.getOrNull(1) ?: anime.url
+        val filterSeason = parts.getOrNull(2)?.toIntOrNull()
 
         val isKitsu = id.startsWith("kitsu") || type == "anime"
         val kitsuId = if (isKitsu) id.substringAfter("kitsu:") else null
@@ -241,12 +275,12 @@ class CineStream :
             "https://v3-cinemeta.strem.io/meta/$type/$id.json"
         }
 
-        val metaResp = client.get(metaUrl, headers).parseAs<CinemetaMetaDetailResponse>()
+        val metaResp = client.get(metaUrl).parseAs<CinemetaMetaDetailResponse>()
         val meta = metaResp.meta ?: return emptyList()
 
         val externalIds = if (isKitsu && kitsuId != null) {
             runCatching {
-                client.get("https://arm.haglund.dev/api/v2/ids?source=kitsu&id=$kitsuId", headers).parseAs<HaglundIds>()
+                client.get("https://arm.haglund.dev/api/v2/ids?source=kitsu&id=$kitsuId").parseAs<HaglundIds>()
             }.getOrNull()
         } else {
             null
@@ -288,12 +322,18 @@ class CineStream :
                 SEpisode.create().apply {
                     name = "Movie"
                     episode_number = 1F
-                    url = "$type/$id/0/1#${json.encodeToString(payload)}"
+                    url = "$type/$id/0/1#${payload.toJsonString()}"
                 },
             )
         }
 
-        val videos = meta.videos.orEmpty().filter { it.season != 0 }
+        val rawVideos = meta.videos.orEmpty().filter { it.season != 0 }
+        val videos = if (filterSeason != null) {
+            rawVideos.filter { it.season == filterSeason }
+        } else {
+            rawVideos
+        }
+
         return videos.map { ep ->
             val payload = MediaPayload(
                 title = title,
@@ -321,7 +361,7 @@ class CineStream :
                 name = if (epTitle != null) "S${ep.season}E${ep.episode} - $epTitle" else "Episode ${ep.episode}"
                 episode_number = ep.episode.toFloat()
                 summary = ep.overview
-                url = "$type/$id/${ep.season}/${ep.episode}#${json.encodeToString(payload)}"
+                url = "$type/$id/${ep.season}/${ep.episode}#${payload.toJsonString()}"
             }
         }.reversed()
     }
@@ -331,16 +371,13 @@ class CineStream :
     override fun episodeListRequest(anime: SAnime): Request = throw UnsupportedOperationException()
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
-    override fun seasonListRequest(anime: SAnime): Request = throw UnsupportedOperationException()
-    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
-
     // ============================== Hosters ===============================
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val payloadJson = episode.url.substringAfter('#', "")
         if (payloadJson.isBlank()) return emptyList()
 
-        val media = runCatching { json.decodeFromString<MediaPayload>(payloadJson) }.getOrNull()
+        val media = runCatching { payloadJson.parseAs<MediaPayload>() }.getOrNull()
             ?: return emptyList()
 
         val providers = CineStreamExtractors.BUILTIN_PROVIDERS.filter { p ->
@@ -354,7 +391,7 @@ class CineStream :
             val hosterPayload = HosterPayload(p.key, media)
             Hoster(
                 hosterName = p.name,
-                internalData = json.encodeToString(hosterPayload),
+                internalData = hosterPayload.toJsonString(),
             )
         }
     }
@@ -373,7 +410,7 @@ class CineStream :
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val hosterPayload = runCatching {
-            json.decodeFromString<HosterPayload>(hoster.internalData)
+            hoster.internalData.parseAs<HosterPayload>()
         }.getOrNull() ?: return emptyList()
 
         val rawVideos = CineStreamExtractors.extractVideos(
