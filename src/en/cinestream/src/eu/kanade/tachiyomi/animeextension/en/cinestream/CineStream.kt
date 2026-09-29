@@ -58,18 +58,43 @@ class CineStream :
 
     // ============================== Popular ===============================
 
-    override suspend fun getPopularAnime(page: Int): AnimesPage {
+    override suspend fun getPopularAnime(page: Int): AnimesPage = coroutineScope {
         val skip = (page - 1) * PAGE_SIZE
-        val url = "https://cinemeta-catalogs.strem.io/top/catalog/movie/top/skip=$skip.json"
-        val resp = client.get(url).parseAs<CinemetaCatalogResponse>()
-        val animeList = resp.metas.map { media ->
+        val movieDeferred = async {
+            runCatching {
+                client.get("https://cinemeta-catalogs.strem.io/top/catalog/movie/top/skip=$skip.json")
+                    .parseAs<CinemetaCatalogResponse>()
+            }.getOrNull()
+        }
+        val seriesDeferred = async {
+            runCatching {
+                client.get("https://cinemeta-catalogs.strem.io/top/catalog/series/top/skip=$skip.json")
+                    .parseAs<CinemetaCatalogResponse>()
+            }.getOrNull()
+        }
+        val animeDeferred = async {
+            runCatching {
+                client.get("https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-popular/skip=$skip.json")
+                    .parseAs<CinemetaCatalogResponse>()
+            }.getOrNull()
+        }
+
+        val movieResp = movieDeferred.await()
+        val seriesResp = seriesDeferred.await()
+        val animeResp = animeDeferred.await()
+
+        val allMetas = (movieResp?.metas.orEmpty() + seriesResp?.metas.orEmpty() + animeResp?.metas.orEmpty())
+            .distinctBy { it.id }
+
+        val animeList = allMetas.map { media ->
             SAnime.create().apply {
                 this.url = "${media.type}/${media.id}"
                 this.title = media.name ?: media.aliases?.firstOrNull() ?: media.id
                 this.thumbnail_url = media.poster
             }
         }
-        return AnimesPage(animeList, resp.hasMore)
+        val hasMore = (movieResp?.hasMore == true) || (seriesResp?.hasMore == true) || (animeResp?.hasMore == true)
+        AnimesPage(animeList, hasMore)
     }
 
     override fun popularAnimeRequest(page: Int): Request = throw UnsupportedOperationException()
@@ -374,7 +399,8 @@ class CineStream :
                 isBollywood = isBollywood,
                 isAsian = isAsian,
                 isCartoon = isCartoon,
-                imdbId = ep.imdbId ?: imdbId,
+                imdbId = imdbId,
+                epImdbId = ep.imdbId,
                 imdbSeason = ep.imdbSeason ?: ep.season,
                 imdbEpisode = ep.imdbEpisode ?: ep.episode,
                 isKitsu = isKitsu,
@@ -505,8 +531,8 @@ class CineStream :
         private const val PREF_TORRENTS_DEFAULT = true
 
         private const val PREF_HOSTER_KEY = "preferred_hoster"
-        private val PREF_HOSTER_ENTRIES = listOf("Videasy", "Hexa", "Vidrock", "VidFastPro", "Torrentio", "Re:ANIME")
-        private val PREF_HOSTER_VALUES = listOf("Videasy", "Hexa", "Vidrock", "VidFastPro", "Torrentio", "Re:ANIME")
-        private const val PREF_HOSTER_DEFAULT = "Videasy"
+        private val PREF_HOSTER_ENTRIES = CineStreamExtractors.BUILTIN_PROVIDERS.map { it.name }
+        private val PREF_HOSTER_VALUES = CineStreamExtractors.BUILTIN_PROVIDERS.map { it.name }
+        private const val PREF_HOSTER_DEFAULT = "Vidrock"
     }
 }
