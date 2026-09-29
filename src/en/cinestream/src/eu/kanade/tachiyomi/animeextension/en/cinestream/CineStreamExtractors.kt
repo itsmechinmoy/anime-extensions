@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.cinestream
 
+import android.util.Base64
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -22,6 +23,9 @@ import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 object CineStreamExtractors {
 
@@ -66,7 +70,7 @@ object CineStreamExtractors {
                 "p_animetosho" -> extractAnimeTosho(media, client)
                 "p_videasy" -> extractVideasy(media, client, baseHeaders, playlistUtils)
                 "p_hexa" -> extractHexa(media, client, baseHeaders, playlistUtils)
-                "p_vidrock" -> extractVidrock(media, client, playlistUtils)
+                "p_vidrock" -> extractVidrock(media, client, baseHeaders, playlistUtils)
                 "p_vidfastpro" -> extractVidFastPro(media, client, playlistUtils)
                 "p_peachify" -> extractPeachify(media, client, baseHeaders, playlistUtils)
                 "p_vidzee" -> extractVidzee(media, client, playlistUtils)
@@ -114,17 +118,20 @@ object CineStreamExtractors {
         media: MediaPayload,
         client: OkHttpClient,
     ): List<Video> {
-        val url = "https://feed.animetosho.xyz/json".toHttpUrl().newBuilder().apply {
+        val url = "https://feed.animetosho.net/json".toHttpUrl().newBuilder().apply {
             media.kitsuId?.let { addQueryParameter("kitsu_id", it) }
             media.malId?.let { addQueryParameter("mal_id", it.toString()) }
             media.episode?.let { addQueryParameter("ep", it.toString()) }
         }.build()
 
-        val array = client.get(url.toString()).parseAs<JsonArray>()
+        val array = runCatching { client.get(url.toString()).parseAs<JsonArray>() }.getOrNull() ?: return emptyList()
         return array.mapNotNull { item ->
             val obj = item.jsonObject
             val title = obj["title"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            val magnet = obj["magnet_url"]?.jsonPrimitive?.content ?: obj["torrent_url"]?.jsonPrimitive?.content ?: return@mapNotNull null
+            val magnet = obj["magnet_uri"]?.jsonPrimitive?.content
+                ?: obj["magnet_url"]?.jsonPrimitive?.content
+                ?: obj["torrent_url"]?.jsonPrimitive?.content
+                ?: return@mapNotNull null
             Video(
                 videoUrl = magnet,
                 videoTitle = "[AnimeTosho] $title",
@@ -233,20 +240,78 @@ object CineStreamExtractors {
     private suspend fun extractVidrock(
         media: MediaPayload,
         client: OkHttpClient,
+        headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
         val type = if (media.tvtype == "movie") "movie" else "tv"
-        val query = if (type == "movie") "$tmdbId" else "${tmdbId}_${media.season ?: 1}_${media.episode ?: 1}"
+        val query = if (type == "movie") "$tmdbId" else "$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
         val apiUrl = "https://vidrock.ru/api/$type/$query/"
 
-        val obj = client.get(apiUrl).parseAs<JsonObject>()
-        val url = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
-        return if (url.contains(".m3u8")) {
-            playlistUtils.extractFromHls(url)
-        } else {
-            listOf(Video(videoUrl = url, videoTitle = "Vidrock"))
+        val vidrockHeaders = headers.newBuilder()
+            .set("Origin", "https://vidrock.ru")
+            .set("Referer", "https://vidrock.ru/")
+            .build()
+
+        val obj = runCatching {
+            client.get(apiUrl, vidrockHeaders).parseAs<JsonObject>()
+        }.getOrNull() ?: return emptyList()
+
+        val videos = mutableListOf<Video>()
+        for ((serverName, serverElement) in obj) {
+            val serverObj = runCatching { serverElement.jsonObject }.getOrNull() ?: continue
+            val encUrl = serverObj["url"]?.jsonPrimitive?.content ?: continue
+            if (encUrl.isBlank() || encUrl == "null" || encUrl == "error") continue
+
+            val decryptedUrl = decryptVidrockUrl(encUrl) ?: continue
+            val videoHeaders = headers.newBuilder()
+                .set("Referer", "https://vidrock.ru/")
+                .build()
+
+            if (decryptedUrl.contains(".m3u8")) {
+                videos += playlistUtils.extractFromHls(
+                    decryptedUrl,
+                    masterHeaders = videoHeaders,
+                    videoHeaders = videoHeaders,
+                    videoNameGen = { quality -> "Vidrock [$serverName] - $quality" },
+                )
+            } else {
+                videos += Video(
+                    videoUrl = decryptedUrl,
+                    videoTitle = "Vidrock [$serverName]",
+                    headers = videoHeaders,
+                )
+            }
         }
+        return videos
+    }
+
+    private fun decryptVidrockUrl(encryptedPayload: String): String? {
+        return runCatching {
+            val aesKeyHex = "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
+            val keyBytes = ByteArray(aesKeyHex.length / 2) { i ->
+                aesKeyHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            }
+
+            var standardBase64 = encryptedPayload.replace("-", "+").replace("_", "/")
+            val remainder = standardBase64.length % 4
+            if (remainder != 0) {
+                standardBase64 += "=".repeat(4 - remainder)
+            }
+
+            val encryptedData = Base64.decode(standardBase64, Base64.DEFAULT)
+            if (encryptedData.size < 13) return null
+
+            val nonce = encryptedData.copyOfRange(0, 12)
+            val cipherTextWithTag = encryptedData.copyOfRange(12, encryptedData.size)
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val keySpec = SecretKeySpec(keyBytes, "AES")
+            val gcmSpec = GCMParameterSpec(128, nonce)
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
+            val decrypted = cipher.doFinal(cipherTextWithTag)
+            String(decrypted, Charsets.UTF_8)
+        }.getOrNull()
     }
 
     // ── VidFastPro ─────────────────────────────────────────────────────────────
@@ -278,22 +343,69 @@ object CineStreamExtractors {
         playlistUtils: PlaylistUtils,
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
-        val url = if (media.tvtype == "movie") {
-            "https://x.eat-peach.sbs/movie/$tmdbId"
-        } else {
-            "https://x.eat-peach.sbs/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
-        }
         val peachHeaders = headers.newBuilder()
             .set("Origin", "https://peachify.top")
             .set("Referer", "https://peachify.top/")
             .build()
-        val obj = runCatching { client.get(url, peachHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
-        val streamUrl = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
-        return if (streamUrl.contains(".m3u8")) {
-            playlistUtils.extractFromHls(streamUrl, masterHeaders = peachHeaders, videoHeaders = peachHeaders)
-        } else {
-            listOf(Video(videoUrl = streamUrl, videoTitle = "Peachify", headers = peachHeaders))
+
+        val servers = listOf("multi", "hr", "holly", "air", "moviebox")
+        val videos = mutableListOf<Video>()
+
+        for (server in servers) {
+            val url = if (media.tvtype == "movie") {
+                "https://x.eat-peach.sbs/$server/movie/$tmdbId"
+            } else {
+                "https://x.eat-peach.sbs/$server/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
+            }
+            val text = runCatching { client.get(url, peachHeaders).body.string() }.getOrNull() ?: continue
+            val encrypt = runCatching { text.parseAs<JsonObject>()["data"]?.jsonPrimitive?.content }.getOrNull() ?: continue
+            if (encrypt.isNullOrBlank()) continue
+
+            val decrypted = decryptPeachifyUrl(encrypt) ?: continue
+            val decryptedObj = runCatching { decrypted.parseAs<JsonObject>() }.getOrNull() ?: continue
+            val streamUrl = decryptedObj["url"]?.jsonPrimitive?.content ?: continue
+            if (streamUrl.contains(".m3u8")) {
+                videos += playlistUtils.extractFromHls(
+                    streamUrl,
+                    masterHeaders = peachHeaders,
+                    videoHeaders = peachHeaders,
+                    videoNameGen = { q -> "Peachify [$server] - $q" },
+                )
+            } else {
+                videos += Video(videoUrl = streamUrl, videoTitle = "Peachify [$server]", headers = peachHeaders)
+            }
         }
+        return videos
+    }
+
+    private fun decryptPeachifyUrl(encrypt: String): String? {
+        return runCatching {
+            val parts = encrypt.split(".")
+            if (parts.size < 3) return null
+
+            fun b64Decode(s: String): ByteArray {
+                var padded = s.replace('-', '+').replace('_', '/')
+                val rem = padded.length % 4
+                if (rem != 0) padded += "=".repeat(4 - rem)
+                return Base64.decode(padded, Base64.DEFAULT)
+            }
+
+            val iv = b64Decode(parts[0])
+            val cipherData = b64Decode(parts[1]) + b64Decode(parts[2])
+
+            val keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d"
+            val keyBytes = ByteArray(keyHex.length / 2) { i ->
+                keyHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            }
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(keyBytes, "AES"),
+                GCMParameterSpec(128, iv),
+            )
+            String(cipher.doFinal(cipherData), Charsets.UTF_8)
+        }.getOrNull()
     }
 
     // ── Vidzee ─────────────────────────────────────────────────────────────────
