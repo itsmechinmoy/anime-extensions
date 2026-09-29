@@ -30,7 +30,7 @@ object CineStreamFilters {
         CatalogOption("Top Crime Series", "https://cinemeta-catalogs.strem.io/top/catalog/series/top", "Crime"),
     )
 
-    data class CatalogOption(
+    class CatalogOption(
         val name: String,
         val baseUrl: String,
         val genre: String? = null,
