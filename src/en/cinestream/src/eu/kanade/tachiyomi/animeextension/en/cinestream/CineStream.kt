@@ -145,7 +145,7 @@ class CineStream :
 
             val responses = tasks.awaitAll().filterNotNull()
             val results = responses.map { it.metas }
-            val hasMore = responses.any { it.metas.size >= PAGE_SIZE }
+            val hasMore = responses.any { it.hasMore || it.metas.size >= PAGE_SIZE }
 
             val interleaved = buildList {
                 val maxSize = results.maxOfOrNull { it.size } ?: 0
