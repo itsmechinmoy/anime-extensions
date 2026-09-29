@@ -9,7 +9,8 @@ import keiyoushi.utils.post
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -24,13 +25,7 @@ import java.security.SecureRandom
 
 object CineStreamExtractors {
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
-    data class ProviderInfo(
+    class ProviderInfo(
         val key: String,
         val name: String,
         val isTorrent: Boolean = false,
@@ -66,18 +61,18 @@ object CineStreamExtractors {
     ): List<Video> = withContext(Dispatchers.IO) {
         runCatching {
             when (providerKey) {
-                "p_torrentio" -> extractTorrentio("https://torrentio.strem.fun/limit=4", "Torrentio", media, client, baseHeaders)
-                "p_torrentsdb" -> extractTorrentio("https://torrentsdb.com/eyJsaW1pdCI6IjMiLCJkZWJyaWRvcHRpb25zIjpbIm5vZG93bmxvYWRsaW5rcyJdfQ==", "TorrentsDB", media, client, baseHeaders)
-                "p_animetosho" -> extractAnimeTosho(media, client, baseHeaders)
+                "p_torrentio" -> extractTorrentio("https://torrentio.strem.fun/limit=4", "Torrentio", media, client)
+                "p_torrentsdb" -> extractTorrentio("https://torrentsdb.com/eyJsaW1pdCI6IjMiLCJkZWJyaWRvcHRpb25zIjpbIm5vZG93bmxvYWRsaW5rcyJdfQ==", "TorrentsDB", media, client)
+                "p_animetosho" -> extractAnimeTosho(media, client)
                 "p_videasy" -> extractVideasy(media, client, baseHeaders, playlistUtils)
                 "p_hexa" -> extractHexa(media, client, baseHeaders, playlistUtils)
-                "p_vidrock" -> extractVidrock(media, client, baseHeaders, playlistUtils)
-                "p_vidfastpro" -> extractVidFastPro(media, client, baseHeaders, playlistUtils)
+                "p_vidrock" -> extractVidrock(media, client, playlistUtils)
+                "p_vidfastpro" -> extractVidFastPro(media, client, playlistUtils)
                 "p_peachify" -> extractPeachify(media, client, baseHeaders, playlistUtils)
-                "p_vidzee" -> extractVidzee(media, client, baseHeaders, playlistUtils)
+                "p_vidzee" -> extractVidzee(media, client, playlistUtils)
                 "p_vaplayer" -> extractVaPlayer(media, client, baseHeaders, playlistUtils)
                 "p_castle" -> extractCastle(media, client, baseHeaders, playlistUtils)
-                "p_tokyoinsider" -> extractTokyoInsider(media, client, baseHeaders)
+                "p_tokyoinsider" -> extractTokyoInsider(media, client)
                 "p_reanime" -> extractReanime(media, client, baseHeaders, playlistUtils)
                 "p_just4anime" -> extractJust4Anime(media, client, baseHeaders, playlistUtils)
                 "p_kisskh" -> extractKisskh(media, client, baseHeaders, playlistUtils)
@@ -92,7 +87,6 @@ object CineStreamExtractors {
         sourceName: String,
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
     ): List<Video> {
         val streamPath = if (media.tvtype == "movie") {
             "movie/${media.imdbId ?: media.id}.json"
@@ -103,7 +97,7 @@ object CineStreamExtractors {
         }
 
         val url = "$api/stream/$streamPath"
-        val response = client.get(url, headers).parseAs<TorrentioResponse>()
+        val response = client.get(url).parseAs<TorrentioResponse>()
         return response.streams.mapNotNull { s ->
             val infoHash = s.infoHash ?: return@mapNotNull null
             val title = s.title ?: s.description ?: s.name ?: "Stream"
@@ -119,7 +113,6 @@ object CineStreamExtractors {
     private suspend fun extractAnimeTosho(
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
     ): List<Video> {
         val url = "https://feed.animetosho.xyz/json".toHttpUrl().newBuilder().apply {
             media.kitsuId?.let { addQueryParameter("kitsu_id", it) }
@@ -127,9 +120,7 @@ object CineStreamExtractors {
             media.episode?.let { addQueryParameter("ep", it.toString()) }
         }.build()
 
-        val resp = client.get(url.toString(), headers)
-        val text = resp.body.string()
-        val array = json.parseToJsonElement(text).jsonArray
+        val array = client.get(url.toString()).parseAs<JsonArray>()
         return array.mapNotNull { item ->
             val obj = item.jsonObject
             val title = obj["title"]?.jsonPrimitive?.content ?: return@mapNotNull null
@@ -211,8 +202,8 @@ object CineStreamExtractors {
         SecureRandom().nextBytes(keyBytes)
         val key = keyBytes.joinToString("") { "%02x".format(it) }
 
-        val tokenResp = client.get("https://enc-dec.app/api/enc-hexa").body.string()
-        val token = json.parseToJsonElement(tokenResp).jsonObject["result"]?.jsonObject?.get("token")?.jsonPrimitive?.content ?: ""
+        val tokenResp = client.get("https://enc-dec.app/api/enc-hexa").parseAs<JsonObject>()
+        val token = tokenResp["result"]?.jsonObject?.get("token")?.jsonPrimitive?.content ?: ""
 
         val hexaHeaders = headers.newBuilder()
             .set("X-Api-Key", key)
@@ -242,7 +233,6 @@ object CineStreamExtractors {
     private suspend fun extractVidrock(
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
@@ -250,13 +240,12 @@ object CineStreamExtractors {
         val query = if (type == "movie") "$tmdbId" else "${tmdbId}_${media.season ?: 1}_${media.episode ?: 1}"
         val apiUrl = "https://vidrock.ru/api/$type/$query/"
 
-        val respText = client.get(apiUrl, headers).body.string()
-        val obj = json.parseToJsonElement(respText).jsonObject
+        val obj = client.get(apiUrl).parseAs<JsonObject>()
         val url = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
         return if (url.contains(".m3u8")) {
-            playlistUtils.extractFromHls(url, masterHeaders = headers, videoHeaders = headers)
+            playlistUtils.extractFromHls(url)
         } else {
-            listOf(Video(videoUrl = url, videoTitle = "Vidrock", headers = headers))
+            listOf(Video(videoUrl = url, videoTitle = "Vidrock"))
         }
     }
 
@@ -264,7 +253,6 @@ object CineStreamExtractors {
     private suspend fun extractVidFastPro(
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
@@ -273,12 +261,12 @@ object CineStreamExtractors {
         } else {
             "https://vidfast.vc/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}/"
         }
-        val doc = Jsoup.parse(client.get(url, headers).body.string())
+        val doc = Jsoup.parse(client.get(url).body.string())
         val iframe = doc.selectFirst("iframe")?.attr("src") ?: return emptyList()
         return if (iframe.contains(".m3u8")) {
-            playlistUtils.extractFromHls(iframe, masterHeaders = headers, videoHeaders = headers)
+            playlistUtils.extractFromHls(iframe)
         } else {
-            listOf(Video(videoUrl = iframe, videoTitle = "VidFastPro", headers = headers))
+            listOf(Video(videoUrl = iframe, videoTitle = "VidFastPro"))
         }
     }
 
@@ -299,8 +287,7 @@ object CineStreamExtractors {
             .set("Origin", "https://peachify.top")
             .set("Referer", "https://peachify.top/")
             .build()
-        val resp = client.get(url, peachHeaders).body.string()
-        val obj = runCatching { json.parseToJsonElement(resp).jsonObject }.getOrNull() ?: return emptyList()
+        val obj = runCatching { client.get(url, peachHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
         val streamUrl = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
         return if (streamUrl.contains(".m3u8")) {
             playlistUtils.extractFromHls(streamUrl, masterHeaders = peachHeaders, videoHeaders = peachHeaders)
@@ -313,7 +300,6 @@ object CineStreamExtractors {
     private suspend fun extractVidzee(
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
@@ -322,12 +308,12 @@ object CineStreamExtractors {
         } else {
             "https://player.vidzee.wtf/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
         }
-        val doc = Jsoup.parse(client.get(url, headers).body.string())
+        val doc = Jsoup.parse(client.get(url).body.string())
         val stream = doc.selectFirst("source")?.attr("src") ?: return emptyList()
         return if (stream.contains(".m3u8")) {
-            playlistUtils.extractFromHls(stream, masterHeaders = headers, videoHeaders = headers)
+            playlistUtils.extractFromHls(stream)
         } else {
-            listOf(Video(videoUrl = stream, videoTitle = "Vidzee", headers = headers))
+            listOf(Video(videoUrl = stream, videoTitle = "Vidzee"))
         }
     }
 
@@ -345,8 +331,7 @@ object CineStreamExtractors {
             "https://streamdata.vaplayer.ru/tv/$id/${media.season ?: 1}/${media.episode ?: 1}"
         }
         val vaHeaders = headers.newBuilder().set("Referer", "https://nextgencloudfabric.com/").build()
-        val resp = client.get(url, vaHeaders).body.string()
-        val obj = runCatching { json.parseToJsonElement(resp).jsonObject }.getOrNull() ?: return emptyList()
+        val obj = runCatching { client.get(url, vaHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
         val streamUrl = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
         return if (streamUrl.contains(".m3u8")) {
             playlistUtils.extractFromHls(streamUrl, masterHeaders = vaHeaders, videoHeaders = vaHeaders)
@@ -364,8 +349,8 @@ object CineStreamExtractors {
     ): List<Video> {
         val searchUrl = "https://api.hlowb.com/film-api/v1.1.0/movie/searchByKeyword?channel=IndiaA&clientType=1&keyword=${URLEncoder.encode(media.title, "UTF-8")}&lang=en-US&mode=1&packageName=com.external.castle&page=1&size=10"
         val castleHeaders = headers.newBuilder().set("Referer", "https://api.hlowb.com/").build()
-        val searchResp = runCatching { client.get(searchUrl, castleHeaders).body.string() }.getOrNull() ?: return emptyList()
-        val rows = json.parseToJsonElement(searchResp).jsonObject["rows"]?.jsonArray ?: return emptyList()
+        val searchResp = runCatching { client.get(searchUrl, castleHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
+        val rows = searchResp["rows"]?.jsonArray ?: return emptyList()
         val firstId = rows.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return emptyList()
 
         val videoUrl = "https://api.hlowb.com/film-api/v2.0.1/movie/getVideo2?clientType=1&packageName=com.external.castle&channel=IndiaA&lang=en-US"
@@ -377,8 +362,8 @@ object CineStreamExtractors {
             put("packageName", "com.external.castle")
         }.toJsonRequestBody()
 
-        val videoResp = runCatching { client.post(videoUrl, headers = castleHeaders, body = body).body.string() }.getOrNull() ?: return emptyList()
-        val streamUrl = json.parseToJsonElement(videoResp).jsonObject["videoUrl"]?.jsonPrimitive?.content ?: return emptyList()
+        val videoResp = runCatching { client.post(videoUrl, headers = castleHeaders, body = body).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
+        val streamUrl = videoResp["videoUrl"]?.jsonPrimitive?.content ?: return emptyList()
         return if (streamUrl.contains(".m3u8")) {
             playlistUtils.extractFromHls(streamUrl, masterHeaders = castleHeaders, videoHeaders = castleHeaders)
         } else {
@@ -390,21 +375,20 @@ object CineStreamExtractors {
     private suspend fun extractTokyoInsider(
         media: MediaPayload,
         client: OkHttpClient,
-        headers: Headers,
     ): List<Video> {
         val tvtype = if (media.tvtype == "movie") "_(Movie)" else "_(TV)"
         val firstChar = media.title.firstOrNull()?.uppercaseChar()?.toString() ?: "0"
         val newTitle = media.title.replace(" ", "_")
-        val doc = Jsoup.parse(client.get("https://www.tokyoinsider.com/anime/$firstChar/$newTitle$tvtype", headers).body.string())
+        val doc = Jsoup.parse(client.get("https://www.tokyoinsider.com/anime/$firstChar/$newTitle$tvtype").body.string())
 
         val selector = if (media.episode != null) "a.download-link:matches((?i)(episode ${media.episode}\\b))" else "a.download-link"
         val aTag = doc.selectFirst(selector) ?: doc.selectFirst("a.download-link") ?: return emptyList()
         val epUrl = aTag.attr("href")
-        val resDoc = Jsoup.parse(client.get("https://www.tokyoinsider.com$epUrl", headers).body.string())
+        val resDoc = Jsoup.parse(client.get("https://www.tokyoinsider.com$epUrl").body.string())
         return resDoc.select("div.c_h2 > div > a").map {
             val name = it.text()
             val dlUrl = it.attr("href")
-            Video(videoUrl = dlUrl, videoTitle = "TokyoInsider - $name", headers = headers)
+            Video(videoUrl = dlUrl, videoTitle = "TokyoInsider - $name")
         }
     }
 
@@ -478,25 +462,23 @@ object CineStreamExtractors {
     ): List<Video> {
         val kHeaders = headers.newBuilder().set("Referer", "https://kisskh.nl/").build()
         val searchResp = runCatching {
-            client.get("https://kisskh.nl/api/DramaList/Search?q=${URLEncoder.encode(media.title, "UTF-8")}&type=0", kHeaders).body.string()
+            client.get("https://kisskh.nl/api/DramaList/Search?q=${URLEncoder.encode(media.title, "UTF-8")}&type=0", kHeaders).parseAs<JsonArray>()
         }.getOrNull() ?: return emptyList()
+        val firstId = searchResp.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return emptyList()
 
-        val list = runCatching { json.parseToJsonElement(searchResp).jsonArray }.getOrNull() ?: return emptyList()
-        val firstId = list.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return emptyList()
-
-        val detailResp = client.get("https://kisskh.nl/api/DramaList/Drama/$firstId?isq=false", kHeaders).body.string()
-        val eps = json.parseToJsonElement(detailResp).jsonObject["episodes"]?.jsonArray ?: return emptyList()
+        val detailResp = client.get("https://kisskh.nl/api/DramaList/Drama/$firstId?isq=false", kHeaders).parseAs<JsonObject>()
+        val eps = detailResp["episodes"]?.jsonArray ?: return emptyList()
 
         val epNumber = media.episode ?: 1
         val epObj = eps.firstOrNull { it.jsonObject["number"]?.jsonPrimitive?.content?.toIntOrNull() == epNumber }
             ?: eps.firstOrNull() ?: return emptyList()
         val epId = epObj.jsonObject["id"]?.jsonPrimitive?.content ?: return emptyList()
 
-        val keyResp = client.get("https://enc-dec.app/api/enc-kisskh?text=$epId&type=vid", kHeaders).body.string()
-        val vidKey = json.parseToJsonElement(keyResp).jsonObject["result"]?.jsonPrimitive?.content ?: return emptyList()
+        val keyResp = client.get("https://enc-dec.app/api/enc-kisskh?text=$epId&type=vid", kHeaders).parseAs<JsonObject>()
+        val vidKey = keyResp["result"]?.jsonPrimitive?.content ?: return emptyList()
 
-        val srcResp = client.get("https://kisskh.nl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$vidKey", kHeaders).body.string()
-        val videoLink = json.parseToJsonElement(srcResp).jsonObject["video"]?.jsonPrimitive?.content ?: return emptyList()
+        val srcResp = client.get("https://kisskh.nl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$vidKey", kHeaders).parseAs<JsonObject>()
+        val videoLink = srcResp["video"]?.jsonPrimitive?.content ?: return emptyList()
 
         return if (videoLink.contains(".m3u8")) {
             playlistUtils.extractFromHls(videoLink, masterHeaders = kHeaders, videoHeaders = kHeaders)
