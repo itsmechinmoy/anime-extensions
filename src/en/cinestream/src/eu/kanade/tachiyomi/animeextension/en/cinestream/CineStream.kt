@@ -22,6 +22,7 @@ import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -35,6 +36,9 @@ class CineStream :
     override val lang = "en"
     override val baseUrl = "https://v3-cinemeta.strem.io"
     override val supportsLatest = true
+
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
 
     override val client: OkHttpClient = network.client.newBuilder()
         .rateLimit(5)
@@ -278,7 +282,15 @@ class CineStream :
         val metaResp = client.get(metaUrl).parseAs<CinemetaMetaDetailResponse>()
         val meta = metaResp.meta ?: return emptyList()
 
-        val externalIds = if (isKitsu && kitsuId != null) {
+        val aniZipResp = if (isKitsu && kitsuId != null) {
+            runCatching {
+                client.get("https://api.ani.zip/mappings?kitsu_id=$kitsuId").parseAs<AniZipResponse>()
+            }.getOrNull()
+        } else {
+            null
+        }
+
+        val externalIds = if (isKitsu && kitsuId != null && aniZipResp?.mappings?.theMovieDbId == null) {
             runCatching {
                 client.get("https://arm.haglund.dev/api/v2/ids?source=kitsu&id=$kitsuId").parseAs<HaglundIds>()
             }.getOrNull()
@@ -287,10 +299,16 @@ class CineStream :
         }
 
         val title = meta.name ?: anime.title
-        val tmdbId = meta.moviedbId ?: externalIds?.themoviedb
-        val imdbId = if (isKitsu) externalIds?.imdb else meta.imdbId ?: id.takeIf { it.startsWith("tt") }
-        val anilistId = externalIds?.anilist
-        val malId = externalIds?.myanimelist
+        val tmdbId = meta.moviedbId
+            ?: aniZipResp?.mappings?.theMovieDbId?.toIntOrNull()
+            ?: externalIds?.themoviedb
+        val imdbId = if (isKitsu) {
+            aniZipResp?.mappings?.imdbId ?: externalIds?.imdb ?: meta.imdbId
+        } else {
+            meta.imdbId ?: id.takeIf { it.startsWith("tt") }
+        }
+        val anilistId = aniZipResp?.mappings?.aniListId?.toInt() ?: externalIds?.anilist
+        val malId = aniZipResp?.mappings?.myAnimeListId?.toInt() ?: externalIds?.myanimelist
         val country = meta.country.orEmpty()
         val genres = meta.genres ?: meta.genre ?: emptyList()
 
@@ -335,6 +353,14 @@ class CineStream :
         }
 
         return videos.map { ep ->
+            val epKey = ep.episode.toString()
+            val aniZipEp = aniZipResp?.episodes?.get(epKey)
+            val epTitle = aniZipEp?.title?.get("en")
+                ?: aniZipEp?.title?.get("x-jat")
+                ?: ep.name?.takeIf { it.isNotBlank() }
+                ?: ep.title?.takeIf { it.isNotBlank() }
+            val epOverview = aniZipEp?.overview ?: ep.overview
+
             val payload = MediaPayload(
                 title = title,
                 id = id,
@@ -357,10 +383,9 @@ class CineStream :
                 kitsuId = kitsuId,
             )
             SEpisode.create().apply {
-                val epTitle = ep.name?.takeIf { it.isNotBlank() } ?: ep.title?.takeIf { it.isNotBlank() }
                 name = if (epTitle != null) "S${ep.season}E${ep.episode} - $epTitle" else "Episode ${ep.episode}"
                 episode_number = ep.episode.toFloat()
-                summary = ep.overview
+                summary = epOverview
                 url = "$type/$id/${ep.season}/${ep.episode}#${payload.toJsonString()}"
             }
         }.reversed()
