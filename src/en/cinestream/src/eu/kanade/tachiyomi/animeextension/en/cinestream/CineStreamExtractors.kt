@@ -459,6 +459,7 @@ object CineStreamExtractors {
         headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
+        if (media.tvtype != "movie") return emptyList()
         val searchUrl = "https://api.hlowb.com/film-api/v1.1.0/movie/searchByKeyword?channel=IndiaA&clientType=1&keyword=${URLEncoder.encode(media.title, "UTF-8")}&lang=en-US&mode=1&packageName=com.external.castle&page=1&size=10"
         val castleHeaders = headers.newBuilder().set("Referer", "https://api.hlowb.com/").build()
         val searchResp = runCatching { client.get(searchUrl, castleHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
