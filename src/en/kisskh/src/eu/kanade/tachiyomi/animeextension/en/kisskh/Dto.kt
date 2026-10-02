@@ -19,7 +19,6 @@ class DramaDto(
 
 @Serializable
 class DramaDetailDto(
-    val id: Int? = null,
     val title: String? = null,
     val description: String? = null,
     val thumbnail: String? = null,
@@ -33,7 +32,6 @@ class DramaDetailDto(
 class EpisodeDto(
     val id: Int? = null,
     val number: Float? = null,
-    val sub: Int? = null,
 )
 
 @Serializable
