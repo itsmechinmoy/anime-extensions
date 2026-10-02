@@ -165,7 +165,7 @@ class KissKH :
         val isOngoing = dto.status?.contains("Ongoing", ignoreCase = true) == true
 
         val episodes = if (hideUnaired && isOngoing) {
-            filterUnairedEpisodes(dto.episodes)
+            runCatching { filterUnairedEpisodes(dto.episodes) }.getOrDefault(dto.episodes)
         } else {
             dto.episodes
         }
@@ -198,8 +198,7 @@ class KissKH :
         var firstAiredIndex = 0
         for ((index, ep) in episodes.withIndex()) {
             val epId = ep.id?.toString() ?: continue
-            val isUnaired = runCatching { isEpisodeUnaired(epId) }.getOrDefault(false)
-            if (isUnaired) {
+            if (isEpisodeUnaired(epId)) {
                 firstAiredIndex = index + 1
             } else {
                 break
