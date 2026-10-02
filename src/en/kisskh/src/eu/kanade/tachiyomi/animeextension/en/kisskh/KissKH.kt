@@ -193,15 +193,23 @@ class KissKH :
     }
 
     private suspend fun filterUnairedEpisodes(episodes: List<EpisodeDto>): List<EpisodeDto> {
-        val latestEpId = episodes.firstOrNull()?.id?.toString() ?: return episodes
-        val isUnaired = try {
-            isEpisodeUnaired(latestEpId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            false
+        var firstAiredIndex = 0
+        for ((index, ep) in episodes.withIndex()) {
+            val epId = ep.id?.toString() ?: continue
+            val isUnaired = try {
+                isEpisodeUnaired(epId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (isUnaired) {
+                firstAiredIndex = index + 1
+            } else {
+                break
+            }
         }
-        return if (isUnaired) episodes.drop(1) else episodes
+        return episodes.drop(firstAiredIndex)
     }
 
     private suspend fun isEpisodeUnaired(epId: String): Boolean {
@@ -220,17 +228,8 @@ class KissKH :
 
     // =========================== Hosters & Videos ==========================
 
-    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
-        Hoster(
-            hosterName = "KissKH",
-            internalData = episode.url,
-        ),
-    )
-
-    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
-
-    override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val id = hoster.internalData
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val id = episode.url
         val kkey = requestVideoKey(id)
         val url = "$baseUrl/api/DramaList/Episode/$id.png?err=false&ts=&time=&kkey=$kkey"
         val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
@@ -245,7 +244,20 @@ class KissKH :
             throw Exception(message)
         }
 
-        val videoUrl = videoDto.video?.takeIf(String::isNotBlank) ?: return emptyList()
+        return listOf(
+            Hoster(
+                hosterName = "KissKH",
+                hosterUrl = videoDto.video ?: "",
+                internalData = id,
+            ),
+        )
+    }
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val id = hoster.internalData
+        val videoUrl = hoster.hosterUrl.takeIf(String::isNotBlank) ?: return emptyList()
 
         val subKey = requestSubKey(id)
         val subList = client.get("$baseUrl/api/Sub/$id?kkey=$subKey")
