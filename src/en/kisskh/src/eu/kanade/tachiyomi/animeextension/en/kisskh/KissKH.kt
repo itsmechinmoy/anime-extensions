@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
-import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -57,8 +56,6 @@ class KissKH :
         get() = preferences.getBoolean(PREF_HIDE_UNAIRED_KEY, PREF_HIDE_UNAIRED_DEFAULT)
 
     private var subDecryptor by LazyMutable { SubDecryptor(client, headers, baseUrl) }
-
-    private val unairedCache by lazy { LruCache<String, Boolean>(128) }
 
     override val supportsRelatedAnimes = false
 
@@ -208,13 +205,10 @@ class KissKH :
     }
 
     private suspend fun isEpisodeUnaired(epId: String): Boolean {
-        unairedCache.get(epId)?.let { return it }
         val kkey = requestVideoKey(epId)
         val url = "$baseUrl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$kkey"
         val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
-        return isCountdownWidget(videoDto.video, videoDto.type).also {
-            unairedCache.put(epId, it)
-        }
+        return isCountdownWidget(videoDto.video, videoDto.type)
     }
 
     private fun isCountdownWidget(videoUrl: String?, type: Int?): Boolean {
