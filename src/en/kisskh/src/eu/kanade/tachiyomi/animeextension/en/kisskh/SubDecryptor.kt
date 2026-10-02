@@ -3,9 +3,8 @@ package eu.kanade.tachiyomi.animeextension.en.kisskh
 import android.net.Uri
 import android.util.Log
 import eu.kanade.tachiyomi.animesource.model.Track
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.get
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import java.io.File
@@ -26,9 +25,7 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
             add("Referer", "$baseurl/")
         }.build()
 
-        val subtitleData = client.newCall(
-            GET(subUrl, subHeaders),
-        ).awaitSuccess().bodyString()
+        val subtitleData = client.get(subUrl, subHeaders).bodyString()
 
         val chunks = subtitleData.split(CHUNK_REGEX)
             .filter(String::isNotBlank)
