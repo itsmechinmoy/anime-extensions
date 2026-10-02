@@ -134,6 +134,7 @@ class KissKH :
             status = parseStatus(dto.status)
             dto.description?.let { description = it }
             dto.thumbnail?.let { thumbnail_url = it }
+            initialized = true
         }
     }
 
@@ -170,7 +171,7 @@ class KissKH :
 
         return episodes.mapNotNull { ep ->
             val epId = ep.id?.toString() ?: return@mapNotNull null
-            val number = ep.number?.toString()?.replace(".0", "") ?: "1"
+            val number = ep.number?.toString()?.removeSuffix(".0") ?: "1"
             SEpisode.create().apply {
                 url = epId
                 ep.number?.let { episode_number = it }
