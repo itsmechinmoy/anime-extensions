@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
+import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -56,6 +57,8 @@ class KissKH :
         get() = preferences.getBoolean(PREF_HIDE_UNAIRED_KEY, PREF_HIDE_UNAIRED_DEFAULT)
 
     private var subDecryptor by LazyMutable { SubDecryptor(client, headers, baseUrl) }
+
+    private val unairedCache by lazy { LruCache<String, Boolean>(128) }
 
     override val supportsRelatedAnimes = false
 
@@ -140,7 +143,8 @@ class KissKH :
     private fun parseStatus(status: String?) = when {
         status == null -> SAnime.UNKNOWN
         status.contains("Ongoing", ignoreCase = true) -> SAnime.ONGOING
-        else -> SAnime.COMPLETED
+        status.contains("Completed", ignoreCase = true) -> SAnime.COMPLETED
+        else -> SAnime.UNKNOWN
     }
 
     // ============================== Episodes ==============================
@@ -157,16 +161,12 @@ class KissKH :
         val dto = response.parseAs<DramaDetailDto>()
         val type = dto.type
         val episodesCount = dto.episodesCount ?: 1
-        val isOngoing = dto.status?.contains("Ongoing", ignoreCase = true) == true
+        val isAiringOrUpcoming = dto.status?.let {
+            it.contains("Ongoing", ignoreCase = true) || it.contains("Upcoming", ignoreCase = true)
+        } == true
 
-        val episodes = if (hideUnaired && isOngoing) {
-            try {
-                filterUnairedEpisodes(dto.episodes)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                dto.episodes
-            }
+        val episodes = if (hideUnaired && isAiringOrUpcoming) {
+            filterUnairedEpisodes(dto.episodes)
         } else {
             dto.episodes
         }
@@ -196,23 +196,25 @@ class KissKH :
     }
 
     private suspend fun filterUnairedEpisodes(episodes: List<EpisodeDto>): List<EpisodeDto> {
-        var firstAiredIndex = 0
-        for ((index, ep) in episodes.withIndex()) {
-            val epId = ep.id?.toString() ?: continue
-            if (isEpisodeUnaired(epId)) {
-                firstAiredIndex = index + 1
-            } else {
-                break
-            }
+        val latestEpId = episodes.firstOrNull()?.id?.toString() ?: return episodes
+        val isUnaired = try {
+            isEpisodeUnaired(latestEpId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
         }
-        return episodes.drop(firstAiredIndex)
+        return if (isUnaired) episodes.drop(1) else episodes
     }
 
     private suspend fun isEpisodeUnaired(epId: String): Boolean {
+        unairedCache.get(epId)?.let { return it }
         val kkey = requestVideoKey(epId)
         val url = "$baseUrl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$kkey"
         val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
-        return isCountdownWidget(videoDto.video, videoDto.type)
+        return isCountdownWidget(videoDto.video, videoDto.type).also {
+            unairedCache.put(epId, it)
+        }
     }
 
     private fun isCountdownWidget(videoUrl: String?, type: Int?): Boolean {
