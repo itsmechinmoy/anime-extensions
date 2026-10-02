@@ -196,14 +196,7 @@ class KissKH :
         var firstAiredIndex = 0
         for ((index, ep) in episodes.withIndex()) {
             val epId = ep.id?.toString() ?: continue
-            val isUnaired = try {
-                isEpisodeUnaired(epId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                false
-            }
-            if (isUnaired) {
+            if (isEpisodeUnaired(epId)) {
                 firstAiredIndex = index + 1
             } else {
                 break
@@ -244,10 +237,12 @@ class KissKH :
             throw Exception(message)
         }
 
+        val videoUrl = videoDto.video?.takeIf(String::isNotBlank) ?: return emptyList()
+
         return listOf(
             Hoster(
                 hosterName = "KissKH",
-                hosterUrl = videoDto.video ?: "",
+                hosterUrl = videoUrl,
                 internalData = id,
             ),
         )
