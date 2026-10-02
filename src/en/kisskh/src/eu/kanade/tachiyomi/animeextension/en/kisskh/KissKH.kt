@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
 import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -17,6 +16,7 @@ import keiyoushi.network.rateLimit
 import keiyoushi.utils.LazyMutable
 import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.addListPreference
+import keiyoushi.utils.addSwitchPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
 import keiyoushi.utils.get
@@ -24,12 +24,14 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.cancellation.CancellationException
 
 class KissKH :
     AnimeHttpSource(),
@@ -59,48 +61,43 @@ class KissKH :
 
     // ============================== Popular ===============================
 
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=1&pageSize=40")
+    override fun popularAnimeRequest(page: Int): Request = GET(browseUrl(page, order = 1))
 
     override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
-    override suspend fun getPopularAnime(page: Int): AnimesPage {
-        val response = client.get("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=1&pageSize=40")
-        val dto = response.parseAs<DramaPageDto>()
-        val hasNextPage = if (dto.totalCount != null && dto.page != null) {
-            dto.page < dto.totalCount
-        } else {
-            false
-        }
-        val animeList = dto.data.mapNotNull { it.toSAnime() }
-        return AnimesPage(animeList, hasNextPage)
-    }
+    override suspend fun getPopularAnime(page: Int): AnimesPage = fetchDramaPage(page, order = 1)
 
     // =============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=2&pageSize=40")
+    override fun latestUpdatesRequest(page: Int): Request = GET(browseUrl(page, order = 2))
 
     override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
-    override suspend fun getLatestUpdates(page: Int): AnimesPage {
-        val response = client.get("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=2&pageSize=40")
+    override suspend fun getLatestUpdates(page: Int): AnimesPage = fetchDramaPage(page, order = 2)
+
+    private fun browseUrl(page: Int, order: Int): String = "$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=$order&pageSize=$PAGE_SIZE"
+
+    private suspend fun fetchDramaPage(page: Int, order: Int): AnimesPage {
+        val response = client.get(browseUrl(page, order))
         val dto = response.parseAs<DramaPageDto>()
-        val hasNextPage = if (dto.totalCount != null && dto.page != null) {
-            dto.page < dto.totalCount
-        } else {
-            false
-        }
+        val hasNextPage = dto.data.size >= PAGE_SIZE
         val animeList = dto.data.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage)
     }
 
     // =============================== Search ===============================
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET("$baseUrl/api/DramaList/Search?q=$query&type=0")
+    private fun searchUrl(query: String) = "$baseUrl/api/DramaList/Search".toHttpUrl().newBuilder()
+        .addQueryParameter("q", query)
+        .addQueryParameter("type", "0")
+        .build()
+
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET(searchUrl(query))
 
     override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
-        val response = client.get("$baseUrl/api/DramaList/Search?q=$query&type=0")
+        val response = client.get(searchUrl(query))
         val list = response.parseAs<List<DramaDto>>()
         val animeList = list.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage = false)
@@ -148,8 +145,6 @@ class KissKH :
 
     // ============================== Episodes ==============================
 
-    override fun getEpisodeUrl(episode: SEpisode): String = "$baseUrl/Drama?id=${episode.url}"
-
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
@@ -165,7 +160,13 @@ class KissKH :
         val isOngoing = dto.status?.contains("Ongoing", ignoreCase = true) == true
 
         val episodes = if (hideUnaired && isOngoing) {
-            runCatching { filterUnairedEpisodes(dto.episodes) }.getOrDefault(dto.episodes)
+            try {
+                filterUnairedEpisodes(dto.episodes)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                dto.episodes
+            }
         } else {
             dto.episodes
         }
@@ -215,8 +216,8 @@ class KissKH :
     }
 
     private fun isCountdownWidget(videoUrl: String?, type: Int?): Boolean {
-        if (type == 2) return true
-        if (videoUrl.isNullOrBlank()) return true
+        if (type == TYPE_COUNTDOWN) return true
+        if (videoUrl.isNullOrBlank()) return false
         return videoUrl.contains("tickcounter.com", ignoreCase = true) ||
             videoUrl.contains("/widget/countdown/", ignoreCase = true)
     }
@@ -283,7 +284,7 @@ class KissKH :
         return client.get(url, headers).parseAs<KeyDto>().key
     }
 
-    private suspend fun getCountdownDetails(url: String?): String? = runCatching {
+    private suspend fun getCountdownDetails(url: String?): String? = try {
         val widgetUrl = UrlUtils.fixUrl(url ?: return null) ?: return null
         val html = client.get(widgetUrl).bodyString()
         val match = COUNTDOWN_REGEX.find(html) ?: return null
@@ -293,17 +294,24 @@ class KissKH :
         }
         val target = format.parse(dateStr)?.time ?: return null
         val diff = target - System.currentTimeMillis()
-        if (diff <= 0) return "airs soon"
-        val days = TimeUnit.MILLISECONDS.toDays(diff)
-        val hours = TimeUnit.MILLISECONDS.toHours(diff) % 24
-        val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
-        buildString {
-            append("airs in ")
-            if (days > 0) append("${days}d ")
-            if (hours > 0 || days > 0) append("${hours}h ")
-            append("${minutes}m")
-        }.trim()
-    }.getOrNull()
+        if (diff <= 0) {
+            "airs soon"
+        } else {
+            val days = TimeUnit.MILLISECONDS.toDays(diff)
+            val hours = TimeUnit.MILLISECONDS.toHours(diff) % 24
+            val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
+            buildString {
+                append("airs in ")
+                if (days > 0) append("${days}d ")
+                if (hours > 0 || days > 0) append("${hours}h ")
+                append("${minutes}m")
+            }.trim()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
 
     // ============================= Preferences =============================
 
@@ -320,19 +328,20 @@ class KissKH :
             subDecryptor = SubDecryptor(client, headers, baseUrl)
         }
 
-        screen.addPreference(
-            SwitchPreferenceCompat(screen.context).apply {
-                key = PREF_HIDE_UNAIRED_KEY
-                title = "Hide unaired episodes"
-                summary = "Hide upcoming episodes that only have a countdown timer"
-                setDefaultValue(PREF_HIDE_UNAIRED_DEFAULT)
-            },
+        screen.addSwitchPreference(
+            key = PREF_HIDE_UNAIRED_KEY,
+            title = "Hide unaired episodes",
+            summary = "Hide upcoming episodes that only have a countdown timer",
+            default = PREF_HIDE_UNAIRED_DEFAULT,
         )
     }
 
     private val titleUriRegex by lazy { Regex("[^a-zA-Z0-9]") }
 
     companion object {
+        private const val PAGE_SIZE = 40
+        private const val TYPE_COUNTDOWN = 2
+
         private const val PREF_DOMAIN_KEY = "preferred_domain"
         private val DOMAIN_ENTRIES = listOf(
             "kisskh.ovh",
