@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
+import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -23,6 +24,8 @@ import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -45,6 +48,8 @@ class KissKH :
 
     override val client = network.client.newBuilder()
         .rateLimit(5)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
     private val preferences by getPreferencesLazy()
@@ -56,6 +61,9 @@ class KissKH :
         get() = preferences.getBoolean(PREF_HIDE_UNAIRED_KEY, PREF_HIDE_UNAIRED_DEFAULT)
 
     private var subDecryptor by LazyMutable { SubDecryptor(client, headers, baseUrl) }
+
+    private val videoKeyCache by lazy { LruCache<String, String>(100) }
+    private val subKeyCache by lazy { LruCache<String, String>(100) }
 
     override val supportsRelatedAnimes = false
 
@@ -251,24 +259,28 @@ class KissKH :
 
     override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = coroutineScope {
         val id = hoster.internalData
-        val videoUrl = hoster.hosterUrl.takeIf(String::isNotBlank) ?: return emptyList()
+        val videoUrl = hoster.hosterUrl.takeIf(String::isNotBlank) ?: return@coroutineScope emptyList()
 
-        val subKey = requestSubKey(id)
-        val subList = client.get("$baseUrl/api/Sub/$id?kkey=$subKey")
-            .parseAs<List<SubtitleDto>>()
-            .parallelCatchingMapNotNull { item ->
-                val suburl = item.src?.takeIf(String::isNotBlank) ?: return@parallelCatchingMapNotNull null
-                val lang = item.label?.takeIf(String::isNotBlank) ?: "Unknown"
-                if (suburl.contains(".txt")) {
-                    subDecryptor.getSubtitles(suburl, lang)
-                } else {
-                    Track(suburl, lang)
+        val subKeyDeferred = async { requestSubKey(id) }
+
+        val subList = runCatching {
+            val subKey = subKeyDeferred.await()
+            client.get("$baseUrl/api/Sub/$id?kkey=$subKey")
+                .parseAs<List<SubtitleDto>>()
+                .parallelCatchingMapNotNull { item ->
+                    val suburl = item.src?.takeIf(String::isNotBlank) ?: return@parallelCatchingMapNotNull null
+                    val lang = item.label?.takeIf(String::isNotBlank) ?: "Unknown"
+                    if (suburl.contains(".txt")) {
+                        subDecryptor.getSubtitles(suburl, lang)
+                    } else {
+                        Track(suburl, lang)
+                    }
                 }
-            }
+        }.getOrDefault(emptyList())
 
-        return UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
+        UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
             Video(
                 videoUrl = fixedVideoUrl,
                 videoTitle = "FirstParty",
@@ -279,13 +291,15 @@ class KissKH :
     }
 
     private suspend fun requestVideoKey(id: String): String {
+        videoKeyCache[id]?.let { return it }
         val url = "${BuildConfig.KISSKH_API}$id&version=2.8.10"
-        return client.get(url, headers).parseAs<KeyDto>().key
+        return client.get(url, headers).parseAs<KeyDto>().key.also { videoKeyCache.put(id, it) }
     }
 
     private suspend fun requestSubKey(id: String): String {
+        subKeyCache[id]?.let { return it }
         val url = "${BuildConfig.KISSKH_SUB_API}$id&version=2.8.10"
-        return client.get(url, headers).parseAs<KeyDto>().key
+        return client.get(url, headers).parseAs<KeyDto>().key.also { subKeyCache.put(id, it) }
     }
 
     private suspend fun getCountdownDetails(url: String?): String? = try {
