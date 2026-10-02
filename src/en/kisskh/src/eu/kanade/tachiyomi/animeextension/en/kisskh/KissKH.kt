@@ -1,40 +1,38 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.network.rateLimit
 import keiyoushi.utils.LazyMutable
 import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
+import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.float
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
+import java.util.concurrent.TimeUnit
 
 class KissKH :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val name = "KissKH"
@@ -43,84 +41,83 @@ class KissKH :
 
     override val supportsLatest = true
 
-    private val json = Json {
-        isLenient = true
-        ignoreUnknownKeys = true
-    }
+    override val client = network.client.newBuilder()
+        .rateLimit(5)
+        .build()
 
     private val preferences by getPreferencesLazy()
 
     override var baseUrl: String
         by preferences.delegate(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)
 
+    private val hideUnaired: Boolean
+        get() = preferences.getBoolean(PREF_HIDE_UNAIRED_KEY, PREF_HIDE_UNAIRED_DEFAULT)
+
     private var subDecryptor by LazyMutable { SubDecryptor(client, headers, baseUrl) }
 
     override val supportsRelatedAnimes = false
 
-    /* Popular Animes */
+    // ============================== Popular ===============================
 
     override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=1&pageSize=40")
 
-    override fun popularAnimeParse(response: Response): AnimesPage {
-        val responseString = response.body.string()
-        return parsePopularAnimeJson(responseString)
-    }
+    override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
-    private fun parsePopularAnimeJson(jsonData: String): AnimesPage {
-        val jObject = json.decodeFromString<JsonObject>(jsonData)
-        val lastPage = jObject["totalCount"]?.jsonPrimitive?.int
-        val page = jObject["page"]?.jsonPrimitive?.int
-        val hasNextPage = if (lastPage != null && page != null) {
-            page < lastPage
+    override suspend fun getPopularAnime(page: Int): AnimesPage {
+        val response = client.get("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=1&pageSize=40")
+        val dto = response.parseAs<DramaPageDto>()
+        val hasNextPage = if (dto.totalCount != null && dto.page != null) {
+            dto.page < dto.totalCount
         } else {
             false
         }
-        val animeList = jObject["data"]?.jsonArray?.mapNotNull { item ->
-            SAnime.create().apply {
-                title = item.jsonObject["title"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val animeId = item.jsonObject["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val titleURI = title.replace(titleUriRegex, "-")
-                url = "/Drama/$titleURI?id=$animeId"
-                thumbnail_url = item.jsonObject["thumbnail"]?.jsonPrimitive?.content
-            }
-        } ?: emptyList()
+        val animeList = dto.data.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage)
     }
 
-    /* Latest */
+    // =============================== Latest ===============================
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=2&pageSize=40")
 
-    override fun latestUpdatesParse(response: Response): AnimesPage {
-        val responseString = response.body.string()
-        return parseLatestAnimeJson(responseString)
+    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
+
+    override suspend fun getLatestUpdates(page: Int): AnimesPage {
+        val response = client.get("$baseUrl/api/DramaList/List?page=$page&type=0&sub=0&country=0&status=0&order=2&pageSize=40")
+        val dto = response.parseAs<DramaPageDto>()
+        val hasNextPage = if (dto.totalCount != null && dto.page != null) {
+            dto.page < dto.totalCount
+        } else {
+            false
+        }
+        val animeList = dto.data.mapNotNull { it.toSAnime() }
+        return AnimesPage(animeList, hasNextPage)
     }
 
-    private fun parseLatestAnimeJson(jsonData: String) = parsePopularAnimeJson(jsonData)
-
-    /* Search */
+    // =============================== Search ===============================
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET("$baseUrl/api/DramaList/Search?q=$query&type=0")
 
-    override fun searchAnimeParse(response: Response): AnimesPage {
-        val responseString = response.body.string()
-        return parseSearchAnimeJson(responseString)
-    }
+    override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
-    private fun parseSearchAnimeJson(jsonData: String): AnimesPage {
-        val animeList = json.decodeFromString<JsonArray>(jsonData).mapNotNull { item ->
-            SAnime.create().apply {
-                title = item.jsonObject["title"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val animeId = item.jsonObject["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val titleURI = title.replace(titleUriRegex, "-")
-                url = "/Drama/$titleURI?id=$animeId"
-                thumbnail_url = item.jsonObject["thumbnail"]?.jsonPrimitive?.content
-            }
-        }
+    override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
+        val response = client.get("$baseUrl/api/DramaList/Search?q=$query&type=0")
+        val list = response.parseAs<List<DramaDto>>()
+        val animeList = list.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage = false)
     }
 
-    /* Details */
+    private fun DramaDto.toSAnime(): SAnime? {
+        val dramaTitle = title ?: return null
+        val dramaId = id ?: return null
+        val titleURI = dramaTitle.replace(titleUriRegex, "-")
+        return SAnime.create().apply {
+            this.title = dramaTitle
+            url = "/Drama/$titleURI?id=$dramaId"
+            thumbnail_url = thumbnail
+        }
+    }
+
+    // ============================== Details ===============================
 
     override fun getAnimeUrl(anime: SAnime): String = baseUrl + anime.url
 
@@ -129,17 +126,18 @@ class KissKH :
         return GET("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
     }
 
-    override fun animeDetailsParse(response: Response): SAnime {
-        val responseString = response.body.string()
-        return parseAnimeDetailsParseJson(responseString)
-    }
+    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
 
-    private fun parseAnimeDetailsParseJson(jsonData: String): SAnime = SAnime.create().apply {
-        val jObject = json.decodeFromString<JsonObject>(jsonData)
-        jObject.jsonObject["title"]?.jsonPrimitive?.content?.let { title = it }
-        jObject.jsonObject["status"]?.jsonPrimitive?.content?.let { status = parseStatus(it) }
-        jObject.jsonObject["description"]?.jsonPrimitive?.content?.let { description = it }
-        jObject.jsonObject["thumbnail"]?.jsonPrimitive?.content?.let { thumbnail_url = it }
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        val id = anime.url.substringAfter("id=").substringBefore("&")
+        val response = client.get("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
+        val dto = response.parseAs<DramaDetailDto>()
+        return SAnime.create().apply {
+            dto.title?.let { title = it }
+            status = parseStatus(dto.status)
+            dto.description?.let { description = it }
+            dto.thumbnail?.let { thumbnail_url = it }
+        }
     }
 
     private fun parseStatus(status: String?) = when {
@@ -148,25 +146,36 @@ class KissKH :
         else -> SAnime.COMPLETED
     }
 
-    /* Episodes */
+    // ============================== Episodes ==============================
 
-    override fun episodeListRequest(anime: SAnime) = animeDetailsRequest(anime)
+    override fun getEpisodeUrl(episode: SEpisode): String = "$baseUrl/Drama?id=${episode.url}"
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val responseString = response.body.string()
-        return parseEpisodePage(responseString)
-    }
+    override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
-    private fun parseEpisodePage(jsonData: String): List<SEpisode> {
-        val jObject = json.decodeFromString<JsonObject>(jsonData)
-        val type = jObject["type"]?.jsonPrimitive?.content
-        val episodesCount = jObject["episodesCount"]?.jsonPrimitive?.int ?: 1
-        val episodeList = jObject["episodes"]?.jsonArray?.mapNotNull { item ->
-            val id = item.jsonObject["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            val number = item.jsonObject["number"]?.jsonPrimitive?.content?.replace(".0", "") ?: "1"
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val id = anime.url.substringAfter("id=").substringBefore("&")
+        val response = client.get("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
+        val dto = response.parseAs<DramaDetailDto>()
+        val type = dto.type
+        val episodesCount = dto.episodesCount ?: 1
+        val isOngoing = dto.status?.contains("Ongoing", ignoreCase = true) == true
+
+        val episodes = if (hideUnaired && isOngoing) {
+            filterUnairedEpisodes(dto.episodes)
+        } else {
+            dto.episodes
+        }
+
+        return episodes.mapNotNull { ep ->
+            val epId = ep.id?.toString() ?: return@mapNotNull null
+            val number = ep.number?.toString()?.replace(".0", "") ?: "1"
             SEpisode.create().apply {
-                url = id
-                item.jsonObject["number"]?.jsonPrimitive?.float?.let { episode_number = it }
+                url = epId
+                ep.number?.let { episode_number = it }
                 when {
                     type.isNullOrBlank() -> {
                         name = "Video $number"
@@ -182,50 +191,83 @@ class KissKH :
                     }
                 }
             }
-        } ?: emptyList()
-        return episodeList
+        }
     }
 
-    // Video Extractor
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val kkey = requestVideoKey(episode.url)
-        val url = "$baseUrl/api/DramaList/Episode/${episode.url}.png?err=false&ts=&time=&kkey=$kkey"
-        val videoListRequest = GET(url, headers)
-        return client.newCall(videoListRequest)
-            .awaitSuccess()
-            .use { response ->
-                val id = response.request.url.toString()
-                    .substringAfter("Episode/").substringBefore(".png")
-                videosFromElement(response, id)
-            }
-    }
-
-    override fun videoListRequest(episode: SEpisode) = throw UnsupportedOperationException()
-    override fun videoListParse(response: Response) = throw UnsupportedOperationException()
-
-    private suspend fun videosFromElement(response: Response, id: String): List<Video> {
-        val jsonData = response.body.string()
-        val jObject = json.decodeFromString<JsonObject>(jsonData)
-        val videoUrl = jObject["Video"]?.jsonPrimitive?.content ?: return emptyList()
-
-        val kkey = requestSubKey(id)
-        val subData = client.newCall(GET("$baseUrl/api/Sub/$id?kkey=$kkey")).awaitSuccess().bodyString()
-
-        val subList = json.decodeFromString<JsonArray>(subData).parallelCatchingMapNotNull { item ->
-            val suburl = item.jsonObject["src"]?.jsonPrimitive?.content ?: return@parallelCatchingMapNotNull null
-            val lang = item.jsonObject["label"]?.jsonPrimitive?.content ?: "Unknown"
-            if (suburl.contains(".txt")) {
-                subDecryptor.getSubtitles(suburl, lang)
+    private suspend fun filterUnairedEpisodes(episodes: List<EpisodeDto>): List<EpisodeDto> {
+        var firstAiredIndex = 0
+        for ((index, ep) in episodes.withIndex()) {
+            val epId = ep.id?.toString() ?: continue
+            val isUnaired = runCatching { isEpisodeUnaired(epId) }.getOrDefault(false)
+            if (isUnaired) {
+                firstAiredIndex = index + 1
             } else {
-                Track(suburl, lang)
+                break
             }
         }
+        return episodes.drop(firstAiredIndex)
+    }
 
-        return UrlUtils.fixUrl(videoUrl)?.let { videoUrl ->
+    private suspend fun isEpisodeUnaired(epId: String): Boolean {
+        val kkey = requestVideoKey(epId)
+        val url = "$baseUrl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$kkey"
+        val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
+        return isCountdownWidget(videoDto.video, videoDto.type)
+    }
+
+    private fun isCountdownWidget(videoUrl: String?, type: Int?): Boolean {
+        if (type == 2) return true
+        if (videoUrl.isNullOrBlank()) return true
+        return videoUrl.contains("tickcounter.com", ignoreCase = true) ||
+            videoUrl.contains("/widget/countdown/", ignoreCase = true)
+    }
+
+    // =========================== Hosters & Videos ==========================
+
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
+        Hoster(
+            hosterName = "KissKH",
+            internalData = episode.url,
+        ),
+    )
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val id = hoster.internalData
+        val kkey = requestVideoKey(id)
+        val url = "$baseUrl/api/DramaList/Episode/$id.png?err=false&ts=&time=&kkey=$kkey"
+        val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
+
+        if (isCountdownWidget(videoDto.video, videoDto.type)) {
+            val countdown = getCountdownDetails(videoDto.video)
+            val message = if (countdown != null) {
+                "This episode has not aired yet ($countdown)"
+            } else {
+                "This episode has not aired yet (countdown timer active)"
+            }
+            throw Exception(message)
+        }
+
+        val videoUrl = videoDto.video?.takeIf(String::isNotBlank) ?: return emptyList()
+
+        val subKey = requestSubKey(id)
+        val subList = client.get("$baseUrl/api/Sub/$id?kkey=$subKey")
+            .parseAs<List<SubtitleDto>>()
+            .parallelCatchingMapNotNull { item ->
+                val suburl = item.src?.takeIf(String::isNotBlank) ?: return@parallelCatchingMapNotNull null
+                val lang = item.label?.takeIf(String::isNotBlank) ?: "Unknown"
+                if (suburl.contains(".txt")) {
+                    subDecryptor.getSubtitles(suburl, lang)
+                } else {
+                    Track(suburl, lang)
+                }
+            }
+
+        return UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
             Video(
-                videoUrl,
-                "FirstParty",
-                videoUrl,
+                videoUrl = fixedVideoUrl,
+                videoTitle = "FirstParty",
                 subtitleTracks = subList,
                 headers = Headers.headersOf("referer", "$baseUrl/", "origin", baseUrl),
             ).let(::listOf)
@@ -234,20 +276,37 @@ class KissKH :
 
     private suspend fun requestVideoKey(id: String): String {
         val url = "${BuildConfig.KISSKH_API}$id&version=2.8.10"
-        return client.newCall(GET(url, headers)).awaitSuccess().parseAs<Key>().key
+        return client.get(url, headers).parseAs<KeyDto>().key
     }
 
     private suspend fun requestSubKey(id: String): String {
         val url = "${BuildConfig.KISSKH_SUB_API}$id&version=2.8.10"
-        return client.newCall(GET(url, headers)).awaitSuccess().parseAs<Key>().key
+        return client.get(url, headers).parseAs<KeyDto>().key
     }
 
-    @Serializable
-    data class Key(
-        val id: String,
-        val version: String,
-        val key: String,
-    )
+    private suspend fun getCountdownDetails(url: String?): String? = runCatching {
+        val widgetUrl = UrlUtils.fixUrl(url ?: return null) ?: return null
+        val html = client.get(widgetUrl).bodyString()
+        val match = COUNTDOWN_REGEX.find(html) ?: return null
+        val (dateStr, tzStr) = match.destructured
+        val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone(tzStr)
+        }
+        val target = format.parse(dateStr)?.time ?: return null
+        val diff = target - System.currentTimeMillis()
+        if (diff <= 0) return "airs soon"
+        val days = TimeUnit.MILLISECONDS.toDays(diff)
+        val hours = TimeUnit.MILLISECONDS.toHours(diff) % 24
+        val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
+        buildString {
+            append("airs in ")
+            if (days > 0) append("${days}d ")
+            if (hours > 0 || days > 0) append("${hours}h ")
+            append("${minutes}m")
+        }.trim()
+    }.getOrNull()
+
+    // ============================= Preferences =============================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         screen.addListPreference(
@@ -261,6 +320,15 @@ class KissKH :
             baseUrl = it
             subDecryptor = SubDecryptor(client, headers, baseUrl)
         }
+
+        screen.addPreference(
+            SwitchPreferenceCompat(screen.context).apply {
+                key = PREF_HIDE_UNAIRED_KEY
+                title = "Hide unaired episodes"
+                summary = "Hide upcoming episodes that only have a countdown timer"
+                setDefaultValue(PREF_HIDE_UNAIRED_DEFAULT)
+            },
+        )
     }
 
     private val titleUriRegex by lazy { Regex("[^a-zA-Z0-9]") }
@@ -273,8 +341,16 @@ class KissKH :
             "kisskh.co",
             "kisskh.id",
             "kisskh.la",
+            "kisskh.is",
         )
         private val DOMAIN_VALUES = DOMAIN_ENTRIES.map { "https://$it" }
         private val PREF_DOMAIN_DEFAULT = DOMAIN_VALUES[0]
+
+        private const val PREF_HIDE_UNAIRED_KEY = "pref_hide_unaired_episodes"
+        private const val PREF_HIDE_UNAIRED_DEFAULT = true
+
+        private val COUNTDOWN_REGEX by lazy {
+            Regex("""window\.countdown\("([^"]+)",\s*"[^"]*",\s*\d+,\s*"[^"]*",\s*"([^"]+)"""")
+        }
     }
 }
