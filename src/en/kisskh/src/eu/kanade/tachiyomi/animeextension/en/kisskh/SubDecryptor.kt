@@ -33,7 +33,7 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
             val parts = chunk.lines()
             val text = parts.drop(1)
             val d = text.joinToString("\n") { line ->
-                decryptWithKeyIv(workingPair.first, workingPair.second, line)
+                runCatching { decryptWithKeyIv(workingPair.first, workingPair.second, line) }.getOrDefault("")
             }
 
             "${index + 1}\n${parts.first()}\n$d"
