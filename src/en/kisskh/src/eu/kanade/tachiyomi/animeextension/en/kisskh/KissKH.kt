@@ -25,6 +25,7 @@ import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
+import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -87,7 +88,7 @@ class KissKH :
     private suspend fun fetchDramaPage(page: Int, order: Int): AnimesPage {
         val response = client.get(browseUrl(page, order))
         val dto = response.parseAs<DramaPageDto>()
-        val hasNextPage = dto.totalCount?.let { page * PAGE_SIZE < it } ?: (dto.data.size >= PAGE_SIZE)
+        val hasNextPage = dto.totalCount?.let { page < it } ?: (dto.data.size >= PAGE_SIZE)
         val animeList = dto.data.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage)
     }
@@ -220,7 +221,7 @@ class KissKH :
     private suspend fun isEpisodeUnaired(epId: String): Boolean {
         val kkey = requestVideoKey(epId)
         val url = "$baseUrl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$kkey"
-        val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
+        val videoDto = client.get(url, headers, cache = CacheControl.FORCE_NETWORK).parseAs<EpisodeVideoDto>()
         return isCountdownWidget(videoDto.video, videoDto.type)
     }
 
@@ -237,7 +238,7 @@ class KissKH :
         val id = episode.url
         val kkey = requestVideoKey(id)
         val url = "$baseUrl/api/DramaList/Episode/$id.png?err=false&ts=&time=&kkey=$kkey"
-        val videoDto = client.get(url, headers).parseAs<EpisodeVideoDto>()
+        val videoDto = client.get(url, headers, cache = CacheControl.FORCE_NETWORK).parseAs<EpisodeVideoDto>()
 
         if (isCountdownWidget(videoDto.video, videoDto.type)) {
             val countdown = getCountdownDetails(videoDto.video)
@@ -310,7 +311,7 @@ class KissKH :
 
     private suspend fun getCountdownDetails(url: String?): String? = try {
         val widgetUrl = UrlUtils.fixUrl(url ?: return null) ?: return null
-        val html = client.get(widgetUrl).bodyString()
+        val html = client.get(widgetUrl, cache = CacheControl.FORCE_NETWORK).bodyString()
         val match = COUNTDOWN_REGEX.find(html) ?: return null
         val (dateStr, tzStr) = match.destructured
         val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
