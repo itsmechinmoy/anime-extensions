@@ -208,17 +208,17 @@ class KissKH :
         var firstAiredIndex = 0
         for ((index, ep) in episodes.withIndex()) {
             val epId = ep.id?.toString() ?: continue
-            val isUnaired = try {
+            val isUnaired: Boolean? = try {
                 isEpisodeUnaired(epId)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                false
+                null
             }
-            if (isUnaired) {
-                firstAiredIndex = index + 1
-            } else {
-                break
+            when (isUnaired) {
+                true -> firstAiredIndex = index + 1
+                false -> break
+                null -> continue
             }
         }
         return episodes.drop(firstAiredIndex)
