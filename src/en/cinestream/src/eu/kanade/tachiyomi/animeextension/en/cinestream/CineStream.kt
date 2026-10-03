@@ -1,9 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.en.cinestream
 
-import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.playlistutils.PlaylistUtils
-import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.FetchType
@@ -11,26 +9,23 @@ import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.Source
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSwitchPreference
+import keiyoushi.utils.delegate
 import keiyoushi.utils.get
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import java.net.URLEncoder
 
-class CineStream :
-    AnimeHttpSource(),
-    ConfigurableAnimeSource {
+class CineStream : Source() {
 
     override val name = "CineStream"
     override val lang = "en"
@@ -44,39 +39,45 @@ class CineStream :
         .rateLimit(5)
         .build()
 
-    private val preferences: SharedPreferences by getPreferencesLazy()
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val preferredQuality: String
-        get() = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
-
-    private val enableTorrents: Boolean
-        get() = preferences.getBoolean(PREF_TORRENTS_KEY, PREF_TORRENTS_DEFAULT)
-
-    private val preferredHoster: String
-        get() = preferences.getString(PREF_HOSTER_KEY, PREF_HOSTER_DEFAULT) ?: PREF_HOSTER_DEFAULT
+    private val preferredQuality: String by preferences.delegate(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)
+    private val enableTorrents: Boolean by preferences.delegate(PREF_TORRENTS_KEY, PREF_TORRENTS_DEFAULT)
+    private val preferredHoster: String by preferences.delegate(PREF_HOSTER_KEY, PREF_HOSTER_DEFAULT)
 
     // ============================== Popular ===============================
 
     override suspend fun getPopularAnime(page: Int): AnimesPage = coroutineScope {
         val skip = (page - 1) * PAGE_SIZE
         val movieDeferred = async {
-            runCatching {
+            try {
                 client.get("https://cinemeta-catalogs.strem.io/top/catalog/movie/top/skip=$skip.json")
                     .parseAs<CinemetaCatalogResponse>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         }
         val seriesDeferred = async {
-            runCatching {
+            try {
                 client.get("https://cinemeta-catalogs.strem.io/top/catalog/series/top/skip=$skip.json")
                     .parseAs<CinemetaCatalogResponse>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         }
         val animeDeferred = async {
-            runCatching {
+            try {
                 client.get("https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-popular/skip=$skip.json")
                     .parseAs<CinemetaCatalogResponse>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         }
 
         val movieResp = movieDeferred.await()
@@ -97,9 +98,6 @@ class CineStream :
         AnimesPage(animeList, hasMore)
     }
 
-    override fun popularAnimeRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
-
     // ============================== Latest ================================
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
@@ -115,9 +113,6 @@ class CineStream :
         }
         return AnimesPage(animeList, resp.hasMore)
     }
-
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     // ============================== Search ================================
 
@@ -137,9 +132,13 @@ class CineStream :
 
             val tasks = endpoints.map { ep ->
                 async {
-                    runCatching {
+                    try {
                         client.get(ep).parseAs<CinemetaCatalogResponse>()
-                    }.getOrNull()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
                 }
             }
 
@@ -192,9 +191,6 @@ class CineStream :
         AnimesPage(animeList, resp.hasMore)
     }
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = throw UnsupportedOperationException()
-    override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
-
     override fun getFilterList(): AnimeFilterList = CineStreamFilters.getFilterList()
 
     // ============================== Details ===============================
@@ -246,9 +242,6 @@ class CineStream :
         return if (id.startsWith("tt")) "https://www.imdb.com/title/$id" else "https://$metaHost/meta/${anime.url}.json"
     }
 
-    override fun animeDetailsRequest(anime: SAnime): Request = throw UnsupportedOperationException()
-    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
-
     // ============================== Seasons ===============================
 
     override suspend fun getSeasonList(anime: SAnime): List<SAnime> {
@@ -284,9 +277,6 @@ class CineStream :
         }
     }
 
-    override fun seasonListRequest(anime: SAnime): Request = throw UnsupportedOperationException()
-    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
-
     // ============================== Episodes ==============================
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
@@ -308,17 +298,25 @@ class CineStream :
         val meta = metaResp.meta ?: return emptyList()
 
         val aniZipResp = if (isKitsu && kitsuId != null) {
-            runCatching {
+            try {
                 client.get("https://api.ani.zip/mappings?kitsu_id=$kitsuId").parseAs<AniZipResponse>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         } else {
             null
         }
 
         val externalIds = if (isKitsu && kitsuId != null && aniZipResp?.mappings?.theMovieDbId == null) {
-            runCatching {
+            try {
                 client.get("https://arm.haglund.dev/api/v2/ids?source=kitsu&id=$kitsuId").parseAs<HaglundIds>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         } else {
             null
         }
@@ -419,17 +417,17 @@ class CineStream :
 
     override fun getEpisodeUrl(episode: SEpisode): String = baseUrl
 
-    override fun episodeListRequest(anime: SAnime): Request = throw UnsupportedOperationException()
-    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
-
     // ============================== Hosters ===============================
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val payloadJson = episode.url.substringAfter('#', "")
         if (payloadJson.isBlank()) return emptyList()
 
-        val media = runCatching { payloadJson.parseAs<MediaPayload>() }.getOrNull()
-            ?: return emptyList()
+        val media = try {
+            payloadJson.parseAs<MediaPayload>()
+        } catch (_: Exception) {
+            return emptyList()
+        }
 
         val providers = CineStreamExtractors.BUILTIN_PROVIDERS.filter { p ->
             if (p.isTorrent && !enableTorrents) return@filter false
@@ -454,15 +452,14 @@ class CineStream :
         )
     }
 
-    override fun hosterListRequest(episode: SEpisode): Request = throw UnsupportedOperationException()
-    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
-
     // =============================== Videos ===============================
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val hosterPayload = runCatching {
+        val hosterPayload = try {
             hoster.internalData.parseAs<HosterPayload>()
-        }.getOrNull() ?: return emptyList()
+        } catch (_: Exception) {
+            return emptyList()
+        }
 
         val rawVideos = CineStreamExtractors.extractVideos(
             hosterPayload.providerKey,
@@ -472,7 +469,7 @@ class CineStream :
             playlistUtils,
         )
 
-        // Sort videos directly in getVideoList (as required by lib 16 and dev note)
+        // Sort videos directly in getVideoList (as required by Lib 16)
         val prefQual = preferredQuality
         val qualityRank = listOf("2160p", "4k", "1080p", "720p", "480p", "360p")
 
@@ -488,9 +485,6 @@ class CineStream :
             video.copy(preferred = index == 0)
         }
     }
-
-    override fun videoListRequest(hoster: Hoster): Request = throw UnsupportedOperationException()
-    override fun videoListParse(response: Response, hoster: Hoster): List<Video> = throw UnsupportedOperationException()
 
     // ============================ Preferences =============================
 
