@@ -172,7 +172,14 @@ class KissKH :
         } == true
 
         val episodes = if (hideUnaired && isAiringOrUpcoming) {
-            filterUnairedEpisodes(dto.episodes)
+            try {
+                filterUnairedEpisodes(dto.episodes)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("KissKH", "Failed to filter unaired episodes: ${e.message}")
+                dto.episodes
+            }
         } else {
             dto.episodes
         }
@@ -209,7 +216,14 @@ class KissKH :
         var firstAiredIndex = 0
         for ((index, ep) in episodes.withIndex()) {
             val epId = ep.id?.toString() ?: continue
-            if (isEpisodeUnaired(epId)) {
+            val isUnaired = try {
+                isEpisodeUnaired(epId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (isUnaired) {
                 firstAiredIndex = index + 1
             } else {
                 break
