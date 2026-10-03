@@ -87,7 +87,7 @@ class KissKH :
     private suspend fun fetchDramaPage(page: Int, order: Int): AnimesPage {
         val response = client.get(browseUrl(page, order))
         val dto = response.parseAs<DramaPageDto>()
-        val hasNextPage = dto.data.size >= PAGE_SIZE
+        val hasNextPage = dto.totalCount?.let { page * PAGE_SIZE < it } ?: (dto.data.size >= PAGE_SIZE)
         val animeList = dto.data.mapNotNull { it.toSAnime() }
         return AnimesPage(animeList, hasNextPage)
     }
