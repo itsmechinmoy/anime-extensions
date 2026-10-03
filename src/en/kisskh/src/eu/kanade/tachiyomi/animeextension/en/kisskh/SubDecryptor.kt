@@ -27,17 +27,13 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
             .filter(String::isNotBlank)
             .map(String::trim)
 
-        val workingPair = findWorkingKeyIv(chunks)
+        val workingPair = requireNotNull(findWorkingKeyIv(chunks)) { "No working key/IV pair found" }
 
         val decrypted = chunks.mapIndexed { index, chunk ->
             val parts = chunk.lines()
             val text = parts.drop(1)
-            val d = if (workingPair != null) {
-                text.joinToString("\n") { line ->
-                    runCatching { decryptWithKeyIv(workingPair.first, workingPair.second, line) }.getOrDefault("")
-                }
-            } else {
-                ""
+            val d = text.joinToString("\n") { line ->
+                decryptWithKeyIv(workingPair.first, workingPair.second, line)
             }
 
             "${index + 1}\n${parts.first()}\n$d"
