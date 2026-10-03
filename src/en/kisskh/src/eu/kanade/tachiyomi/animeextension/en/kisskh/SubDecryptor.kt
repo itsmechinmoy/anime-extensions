@@ -60,7 +60,6 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
                         } catch (_: Exception) {
                         }
                     }
-                    return null
                 }
             }
         }
