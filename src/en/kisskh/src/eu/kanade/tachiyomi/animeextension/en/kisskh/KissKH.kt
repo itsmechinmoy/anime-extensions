@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.animeextension.en.kisskh
 import android.util.Log
 import android.util.LruCache
 import androidx.preference.PreferenceScreen
+import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -23,8 +24,9 @@ import keiyoushi.utils.delegate
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
-import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -53,6 +55,8 @@ class KissKH : Source() {
         get() = preferences.getBoolean(PREF_HIDE_UNAIRED_KEY, PREF_HIDE_UNAIRED_DEFAULT)
 
     private var subDecryptor by LazyMutable { SubDecryptor(client, headers, baseUrl) }
+
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
     private val videoKeyCache by lazy { LruCache<String, String>(100) }
     private val subKeyCache by lazy { LruCache<String, String>(100) }
@@ -259,14 +263,39 @@ class KissKH : Source() {
             emptyList()
         }
 
-        return UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
-            Video(
-                videoUrl = fixedVideoUrl,
-                videoTitle = "FirstParty",
-                subtitleTracks = subList,
-                headers = Headers.headersOf("referer", "$baseUrl/", "origin", baseUrl),
-            ).let(::listOf)
-        } ?: emptyList()
+        val fixedVideoUrl = UrlUtils.fixUrl(videoUrl) ?: return emptyList()
+        val videoHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/")
+            .set("Origin", baseUrl)
+            .build()
+        val video = Video(
+            videoUrl = fixedVideoUrl,
+            videoTitle = "FirstParty",
+            subtitleTracks = subList,
+            headers = videoHeaders,
+        )
+
+        if (!fixedVideoUrl.toHttpUrl().encodedPath.endsWith(".m3u8", ignoreCase = true)) {
+            return listOf(video)
+        }
+
+        return try {
+            withContext(Dispatchers.IO) {
+                playlistUtils.extractFromHls(
+                    playlistUrl = fixedVideoUrl,
+                    referer = "$baseUrl/",
+                    masterHeaders = videoHeaders,
+                    videoHeaders = videoHeaders,
+                    videoNameGen = { "FirstParty - $it" },
+                    subtitleList = subList,
+                )
+            }.ifEmpty { listOf(video) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("KissKH", "Failed to extract HLS qualities: ${e.message}")
+            listOf(video)
+        }
     }
 
     private suspend fun requestVideoKey(id: String): String {
