@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.kisskh
 
+import android.util.Log
 import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.BuildConfig
@@ -194,6 +195,10 @@ class KissKH :
                         (type.contains("Hollywood") && episodesCount > 1) -> {
                         name = "Episode $number"
                     }
+
+                    else -> {
+                        name = "Episode $number"
+                    }
                 }
             }
         }
@@ -203,7 +208,14 @@ class KissKH :
         var firstAiredIndex = 0
         for ((index, ep) in episodes.withIndex()) {
             val epId = ep.id?.toString() ?: continue
-            if (isEpisodeUnaired(epId)) {
+            val isUnaired = try {
+                isEpisodeUnaired(epId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (isUnaired) {
                 firstAiredIndex = index + 1
             } else {
                 break
@@ -276,7 +288,8 @@ class KissKH :
                 }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("KissKH", "Failed to fetch subtitles: ${e.message}")
             emptyList()
         }
 
