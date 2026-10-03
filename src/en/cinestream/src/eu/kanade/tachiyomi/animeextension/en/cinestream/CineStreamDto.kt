@@ -4,13 +4,13 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class CinemetaCatalogResponse(
+class CinemetaCatalogResponse(
     val metas: List<CinemetaMedia> = emptyList(),
     val hasMore: Boolean = true,
 )
 
 @Serializable
-data class CinemetaMedia(
+class CinemetaMedia(
     val id: String,
     val type: String,
     val name: String? = null,
@@ -21,12 +21,12 @@ data class CinemetaMedia(
 )
 
 @Serializable
-data class CinemetaMetaDetailResponse(
+class CinemetaMetaDetailResponse(
     val meta: CinemetaMetaDetail? = null,
 )
 
 @Serializable
-data class CinemetaMetaDetail(
+class CinemetaMetaDetail(
     val id: String? = null,
     @SerialName("imdb_id") val imdbId: String? = null,
     val type: String? = null,
@@ -47,7 +47,7 @@ data class CinemetaMetaDetail(
 )
 
 @Serializable
-data class CinemetaVideo(
+class CinemetaVideo(
     val id: String? = null,
     val name: String? = null,
     val title: String? = null,
@@ -65,7 +65,7 @@ data class CinemetaVideo(
 )
 
 @Serializable
-data class HaglundIds(
+class HaglundIds(
     val anilist: Int? = null,
     val imdb: String? = null,
     val kitsu: Int? = null,
@@ -77,7 +77,7 @@ data class HaglundIds(
 )
 
 @Serializable
-data class MediaPayload(
+class MediaPayload(
     val title: String,
     val id: String,
     val tmdbId: Int? = null,
@@ -101,18 +101,18 @@ data class MediaPayload(
 )
 
 @Serializable
-data class HosterPayload(
+class HosterPayload(
     val providerKey: String,
     val media: MediaPayload,
 )
 
 @Serializable
-data class TorrentioResponse(
+class TorrentioResponse(
     val streams: List<TorrentioStream> = emptyList(),
 )
 
 @Serializable
-data class TorrentioStream(
+class TorrentioStream(
     val name: String? = null,
     val title: String? = null,
     val description: String? = null,
@@ -122,59 +122,72 @@ data class TorrentioStream(
 )
 
 @Serializable
-data class EncDecResponse(
+class AnimeToshoItemDto(
+    val title: String? = null,
+    @SerialName("magnet_uri") val magnetUri: String? = null,
+    @SerialName("magnet_url") val magnetUrl: String? = null,
+    @SerialName("torrent_url") val torrentUrl: String? = null,
+)
+
+@Serializable
+class EncDecResponse(
     val result: EncDecResult? = null,
 )
 
 @Serializable
-data class EncDecResult(
+class EncDecSingleResultResponse(
+    val result: String? = null,
+)
+
+@Serializable
+class EncDecResult(
     val token: String? = null,
     val sources: List<EncDecSource>? = null,
     val subtitles: List<EncDecSubtitle>? = null,
 )
 
 @Serializable
-data class EncDecSource(
+class EncDecSource(
     val url: String? = null,
     val quality: String? = null,
     val server: String? = null,
 )
 
 @Serializable
-data class EncDecSubtitle(
+class EncDecSubtitle(
     val url: String? = null,
     val language: String? = null,
 )
 
 @Serializable
-data class SeedResponse(
+class SeedResponse(
     val seed: String? = null,
 )
 
 @Serializable
-data class ReanimeResponse(
+class ReanimeResponse(
     val success: Boolean = false,
     val servers: List<ReanimeServer> = emptyList(),
 )
 
 @Serializable
-data class ReanimeServer(
+class ReanimeServer(
     val dataType: String = "",
     val dataLink: String = "",
 )
 
 @Serializable
-data class Just4AnimeResponse(
+class Just4AnimeResponse(
     val data: Just4AnimeData? = null,
 )
 
 @Serializable
-data class Just4AnimeData(
+class Just4AnimeData(
     val servers: List<Just4AnimeServer> = emptyList(),
 )
 
 @Serializable
-data class Just4AnimeServer(
+class Just4AnimeServer(
     val code: String? = null,
     val displayName: String? = null,
     val hasEpisode: Boolean = false,
@@ -182,30 +195,52 @@ data class Just4AnimeServer(
 )
 
 @Serializable
-data class Just4AnimeSourcesResponse(
+class Just4AnimeSourcesResponse(
     val data: Just4AnimeSourceData? = null,
 )
 
 @Serializable
-data class Just4AnimeSourceData(
+class Just4AnimeSourceData(
     val stream: Just4AnimeStream? = null,
 )
 
 @Serializable
-data class Just4AnimeStream(
+class Just4AnimeStream(
     val multi: List<Just4AnimeTrack>? = null,
     val subtitles: List<Just4AnimeTrack>? = null,
 )
 
 @Serializable
-data class Just4AnimeTrack(
+class Just4AnimeTrack(
     val url: String? = null,
     val label: String? = null,
     val kind: String? = null,
 )
 
 @Serializable
-data class AniZipResponse(
+class KisskhSearchItemDto(
+    val id: Int? = null,
+    val title: String? = null,
+)
+
+@Serializable
+class KisskhDetailDto(
+    val episodes: List<KisskhEpisodeDto> = emptyList(),
+)
+
+@Serializable
+class KisskhEpisodeDto(
+    val id: Int? = null,
+    val number: Float? = null,
+)
+
+@Serializable
+class KisskhVideoDto(
+    @SerialName("Video") val video: String? = null,
+)
+
+@Serializable
+class AniZipResponse(
     val titles: Map<String, String?>? = null,
     val episodes: Map<String, AniZipEpisode?>? = null,
     val episodeCount: Int? = null,
@@ -214,7 +249,7 @@ data class AniZipResponse(
 )
 
 @Serializable
-data class AniZipEpisode(
+class AniZipEpisode(
     val episode: String? = null,
     val episodeNumber: Int? = null,
     val seasonNumber: Int? = null,
@@ -225,7 +260,7 @@ data class AniZipEpisode(
 )
 
 @Serializable
-data class AniZipMappings(
+class AniZipMappings(
     @SerialName("animeplanet_id") val animePlanetId: String? = null,
     @SerialName("kitsu_id") val kitsuId: Long? = null,
     @SerialName("mal_id") val myAnimeListId: Long? = null,
