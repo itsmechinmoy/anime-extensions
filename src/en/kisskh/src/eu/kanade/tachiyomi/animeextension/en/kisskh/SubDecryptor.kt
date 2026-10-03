@@ -7,7 +7,6 @@ import keiyoushi.utils.bodyString
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import java.io.File
-import java.nio.ByteBuffer
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -28,15 +27,22 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
             .filter(String::isNotBlank)
             .map(String::trim)
 
+        var decryptedCount = 0
         val decrypted = chunks.mapIndexed { index, chunk ->
             val parts = chunk.lines()
             val text = parts.drop(1)
             val d = text.joinToString("\n") { line ->
-                runCatching { decrypt(line) }.getOrDefault("")
+                val decryptedLine = decrypt(line)
+                if (decryptedLine.isNotBlank()) decryptedCount++
+                decryptedLine
             }
 
             "${index + 1}\n${parts.first()}\n$d"
         }.joinToString("\n\n")
+
+        if (chunks.isNotEmpty() && decryptedCount == 0) {
+            error("Failed to decrypt subtitles: no cues could be decrypted")
+        }
 
         val file = File.createTempFile("subs", ".srt")
             .also(File::deleteOnExit)
@@ -49,22 +55,21 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
 
     private fun decrypt(encryptedB64: String): String {
         if (encryptedB64.isBlank()) return ""
-        for ((key, iv) in KEY_IV_PAIRS) {
+        for (pair in KEY_IV_PAIRS) {
             try {
-                return decryptWithKeyIv(key, iv, encryptedB64)
+                return decryptWithKeyIv(pair.first, pair.second, encryptedB64)
             } catch (_: Exception) {
             }
         }
-        throw IllegalArgumentException("No working key/IV pair found")
+        return ""
     }
 
     @OptIn(ExperimentalEncodingApi::class)
     private fun decryptWithKeyIv(keyBytes: ByteArray, ivBytes: ByteArray, encryptedB64: String): String {
-        if (encryptedB64.isBlank()) return ""
         val encryptedBytes = Base64.decode(encryptedB64)
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
-        return Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(cipher.doFinal(encryptedBytes))).toString()
+        return String(cipher.doFinal(encryptedBytes), Charsets.UTF_8)
     }
 
     companion object {
