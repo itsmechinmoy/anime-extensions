@@ -2,11 +2,12 @@ package eu.kanade.tachiyomi.animeextension.en.kisskh
 
 import android.net.Uri
 import eu.kanade.tachiyomi.animesource.model.Track
+import keiyoushi.network.get
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.get
 import okhttp3.Headers
 import okhttp3.OkHttpClient
 import java.io.File
+import java.nio.ByteBuffer
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -27,13 +28,11 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
             .filter(String::isNotBlank)
             .map(String::trim)
 
-        val workingPair = requireNotNull(findWorkingKeyIv(chunks)) { "No working key/IV pair found" }
-
         val decrypted = chunks.mapIndexed { index, chunk ->
             val parts = chunk.lines()
             val text = parts.drop(1)
             val d = text.joinToString("\n") { line ->
-                runCatching { decryptWithKeyIv(workingPair.first, workingPair.second, line) }.getOrDefault("")
+                runCatching { decrypt(line) }.getOrDefault("")
             }
 
             "${index + 1}\n${parts.first()}\n$d"
@@ -48,22 +47,15 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
         return Track(uri.toString(), subLang)
     }
 
-    private fun findWorkingKeyIv(chunks: List<String>): Pair<ByteArray, ByteArray>? {
-        for (chunk in chunks) {
-            val lines = chunk.lines().drop(1)
-            for (line in lines) {
-                if (line.isNotBlank()) {
-                    for (pair in KEY_IV_PAIRS) {
-                        try {
-                            decryptWithKeyIv(pair.first, pair.second, line)
-                            return pair
-                        } catch (_: Exception) {
-                        }
-                    }
-                }
+    private fun decrypt(encryptedB64: String): String {
+        if (encryptedB64.isBlank()) return ""
+        for ((key, iv) in KEY_IV_PAIRS) {
+            try {
+                return decryptWithKeyIv(key, iv, encryptedB64)
+            } catch (_: Exception) {
             }
         }
-        return null
+        throw IllegalArgumentException("No working key/IV pair found")
     }
 
     @OptIn(ExperimentalEncodingApi::class)
@@ -72,7 +64,7 @@ class SubDecryptor(private val client: OkHttpClient, private val headers: Header
         val encryptedBytes = Base64.decode(encryptedB64)
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
-        return String(cipher.doFinal(encryptedBytes), Charsets.UTF_8)
+        return Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(cipher.doFinal(encryptedBytes))).toString()
     }
 
     companion object {

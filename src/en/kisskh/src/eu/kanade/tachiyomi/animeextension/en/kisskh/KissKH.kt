@@ -4,7 +4,6 @@ import android.util.Log
 import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.BuildConfig
-import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
@@ -12,33 +11,28 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import eu.kanade.tachiyomi.network.GET
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.LazyMutable
+import keiyoushi.utils.Source
 import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSwitchPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
-import keiyoushi.utils.get
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.tryParse
 import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.cancellation.CancellationException
 
-class KissKH :
-    AnimeHttpSource(),
-    ConfigurableAnimeSource {
+class KissKH : Source() {
 
     override val name = "KissKH"
 
@@ -51,8 +45,6 @@ class KissKH :
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
-
-    private val preferences by getPreferencesLazy()
 
     override var baseUrl: String
         by preferences.delegate(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)
@@ -69,17 +61,9 @@ class KissKH :
 
     // ============================== Popular ===============================
 
-    override fun popularAnimeRequest(page: Int): Request = GET(browseUrl(page, order = 1))
-
-    override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
-
     override suspend fun getPopularAnime(page: Int): AnimesPage = fetchDramaPage(page, order = 1)
 
     // =============================== Latest ===============================
-
-    override fun latestUpdatesRequest(page: Int): Request = GET(browseUrl(page, order = 2))
-
-    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage = fetchDramaPage(page, order = 2)
 
@@ -99,10 +83,6 @@ class KissKH :
         .addQueryParameter("q", query)
         .addQueryParameter("type", "0")
         .build()
-
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET(searchUrl(query))
-
-    override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
         val response = client.get(searchUrl(query))
@@ -126,17 +106,8 @@ class KissKH :
 
     override fun getAnimeUrl(anime: SAnime): String = baseUrl + anime.url
 
-    override fun animeDetailsRequest(anime: SAnime): Request {
-        val id = anime.url.substringAfter("id=").substringBefore("&")
-        return GET("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
-    }
-
-    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
-
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
-        val id = anime.url.substringAfter("id=").substringBefore("&")
-        val response = client.get("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
-        val dto = response.parseAs<DramaDetailDto>()
+        val dto = fetchDramaDetails(anime)
         return SAnime.create().apply {
             dto.title?.let { title = it }
             status = parseStatus(dto.status)
@@ -146,40 +117,31 @@ class KissKH :
         }
     }
 
-    private fun parseStatus(status: String?) = when {
-        status == null -> SAnime.UNKNOWN
-        status.contains("Ongoing", ignoreCase = true) -> SAnime.ONGOING
-        status.contains("Completed", ignoreCase = true) -> SAnime.COMPLETED
-        else -> SAnime.UNKNOWN
+    private suspend fun fetchDramaDetails(anime: SAnime): DramaDetailDto {
+        val id = requireNotNull(getAnimeUrl(anime).toHttpUrl().queryParameter("id")) { "Missing drama ID" }
+        return client.get("$baseUrl/api/DramaList/Drama/$id?isq=false").parseAs()
+    }
+
+    private fun parseStatus(status: String?): Int {
+        val normalizedStatus = status.orEmpty().lowercase(Locale.ROOT)
+        return when {
+            "ongoing" in normalizedStatus -> SAnime.ONGOING
+            "completed" in normalizedStatus -> SAnime.COMPLETED
+            else -> SAnime.UNKNOWN
+        }
     }
 
     // ============================== Episodes ==============================
 
-    override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
-
-    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
-
-    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
-
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val id = anime.url.substringAfter("id=").substringBefore("&")
-        val response = client.get("$baseUrl/api/DramaList/Drama/$id?isq=false", headers)
-        val dto = response.parseAs<DramaDetailDto>()
+        val dto = fetchDramaDetails(anime)
         val type = dto.type
         val episodesCount = dto.episodesCount ?: 1
-        val isAiringOrUpcoming = dto.status?.let {
-            it.contains("Ongoing", ignoreCase = true) || it.contains("Upcoming", ignoreCase = true)
-        } == true
+        val status = dto.status.orEmpty().lowercase(Locale.ROOT)
+        val isAiringOrUpcoming = "ongoing" in status || "upcoming" in status
 
         val episodes = if (hideUnaired && isAiringOrUpcoming) {
-            try {
-                filterUnairedEpisodes(dto.episodes)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w("KissKH", "Failed to filter unaired episodes: ${e.message}")
-                dto.episodes
-            }
+            filterUnairedEpisodes(dto.episodes)
         } else {
             dto.episodes
         }
@@ -199,11 +161,6 @@ class KissKH :
                         name = "Movie"
                     }
 
-                    type.contains("Anime") || type.contains("TVSeries") ||
-                        (type.contains("Hollywood") && episodesCount > 1) -> {
-                        name = "Episode $number"
-                    }
-
                     else -> {
                         name = "Episode $number"
                     }
@@ -220,8 +177,9 @@ class KissKH :
                 isEpisodeUnaired(epId)
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                continue
+            } catch (e: Exception) {
+                Log.w("KissKH", "Failed to check episode $epId: ${e.message}")
+                break
             }
             if (isUnaired) {
                 firstAiredIndex = index + 1
@@ -233,10 +191,14 @@ class KissKH :
     }
 
     private suspend fun isEpisodeUnaired(epId: String): Boolean {
-        val kkey = requestVideoKey(epId)
-        val url = "$baseUrl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$kkey"
-        val videoDto = client.get(url, headers, cache = CacheControl.FORCE_NETWORK).parseAs<EpisodeVideoDto>()
+        val videoDto = fetchEpisodeVideo(epId)
         return isCountdownWidget(videoDto.video, videoDto.type)
+    }
+
+    private suspend fun fetchEpisodeVideo(id: String): EpisodeVideoDto {
+        val kkey = requestVideoKey(id)
+        val url = "$baseUrl/api/DramaList/Episode/$id.png?err=false&ts=&time=&kkey=$kkey"
+        return client.get(url, cacheControl = CacheControl.FORCE_NETWORK).parseAs()
     }
 
     private fun isCountdownWidget(videoUrl: String?, type: Int?): Boolean {
@@ -250,9 +212,7 @@ class KissKH :
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val id = episode.url
-        val kkey = requestVideoKey(id)
-        val url = "$baseUrl/api/DramaList/Episode/$id.png?err=false&ts=&time=&kkey=$kkey"
-        val videoDto = client.get(url, headers, cache = CacheControl.FORCE_NETWORK).parseAs<EpisodeVideoDto>()
+        val videoDto = fetchEpisodeVideo(id)
 
         if (isCountdownWidget(videoDto.video, videoDto.type)) {
             val countdown = getCountdownDetails(videoDto.video)
@@ -274,8 +234,6 @@ class KissKH :
             ),
         )
     }
-
-    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val id = hoster.internalData
@@ -325,13 +283,13 @@ class KissKH :
 
     private suspend fun getCountdownDetails(url: String?): String? = try {
         val widgetUrl = UrlUtils.fixUrl(url ?: return null) ?: return null
-        val html = client.get(widgetUrl, cache = CacheControl.FORCE_NETWORK).bodyString()
+        val html = client.get(widgetUrl, cacheControl = CacheControl.FORCE_NETWORK).bodyString()
         val match = COUNTDOWN_REGEX.find(html) ?: return null
         val (dateStr, tzStr) = match.destructured
-        val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone(tzStr)
-        }
-        val target = format.parse(dateStr)?.time ?: return null
+        val target = synchronized(countdownDateFormat) {
+            countdownDateFormat.timeZone = TimeZone.getTimeZone(tzStr)
+            countdownDateFormat.tryParse(dateStr)
+        }.takeIf { it != 0L } ?: return null
         val diff = target - System.currentTimeMillis()
         if (diff <= 0) {
             "airs soon"
@@ -376,6 +334,8 @@ class KissKH :
     }
 
     private val titleUriRegex by lazy { Regex("[^a-zA-Z0-9]") }
+
+    private val countdownDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
 
     companion object {
         private const val PAGE_SIZE = 40
