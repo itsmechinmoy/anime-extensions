@@ -1,19 +1,23 @@
 package eu.kanade.tachiyomi.animeextension.all.crunchyroll
 
+import android.content.SharedPreferences
 import android.text.InputType
 import android.util.Log
 import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import keiyoushi.utils.Source
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
@@ -46,7 +50,9 @@ import java.util.UUID
  * Streams are Widevine-protected DASH. The manifest and license endpoint are passed
  * to the player through [Video.internalData]; the device CDM does the key exchange.
  */
-class Crunchyroll : Source() {
+class Crunchyroll :
+    AnimeHttpSource(),
+    ConfigurableAnimeSource {
 
     override val name = "Crunchyroll"
 
@@ -55,6 +61,8 @@ class Crunchyroll : Source() {
     override val lang = "all"
 
     override val supportsLatest = true
+
+    private val preferences: SharedPreferences by getPreferencesLazy()
 
     init {
         // The app looks for a stored sub/dub value to decide whether to show its
@@ -207,9 +215,15 @@ class Crunchyroll : Source() {
 
     override suspend fun getPopularAnime(page: Int): AnimesPage = browse(page, "popularity")
 
+    override fun popularAnimeRequest(page: Int) = throw UnsupportedOperationException()
+    override fun popularAnimeParse(response: Response) = throw UnsupportedOperationException()
+
     // =============================== Latest ===============================
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage = browse(page, "newly_added")
+
+    override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException()
+    override fun latestUpdatesParse(response: Response) = throw UnsupportedOperationException()
 
     private suspend fun browse(page: Int, sortBy: String): AnimesPage {
         val url = "$baseUrl/content/v2/discover/browse".toHttpUrl().newBuilder()
@@ -257,6 +271,9 @@ class Crunchyroll : Source() {
         return AnimesPage(entries, items.size >= PAGE_SIZE)
     }
 
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList) = throw UnsupportedOperationException()
+    override fun searchAnimeParse(response: Response) = throw UnsupportedOperationException()
+
     private fun seasonEntries(item: ContentItemDto): List<SAnime> {
         val seasonsUrl = "$baseUrl/content/v2/cms/series/${item.id}/seasons?locale=$contentLocale"
         val seasons = runCatching {
@@ -294,6 +311,9 @@ class Crunchyroll : Source() {
             initialized = true
         }
     }
+
+    override fun animeDetailsRequest(anime: SAnime) = throw UnsupportedOperationException()
+    override fun animeDetailsParse(response: Response) = throw UnsupportedOperationException()
 
     override fun getAnimeUrl(anime: SAnime) = "$baseUrl/series/${anime.seriesId}"
 
@@ -352,11 +372,16 @@ class Crunchyroll : Source() {
         }.reversed()
     }
 
+    override fun episodeListRequest(anime: SAnime) = throw UnsupportedOperationException()
+    override fun episodeListParse(response: Response) = throw UnsupportedOperationException()
+    override fun seasonListRequest(anime: SAnime) = throw UnsupportedOperationException()
+    override fun seasonListParse(response: Response) = throw UnsupportedOperationException()
+
     override fun getEpisodeUrl(episode: SEpisode) = "$baseUrl/watch/${episode.url}"
 
-    // ============================ Video Links =============================
+    // ============================== Hosters ===============================
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         // No playback-stopped hook exists, so this is the only reliable place to
         // hand back the previous slot before taking another.
         releasePreviousStream()
@@ -386,17 +411,6 @@ class Crunchyroll : Source() {
             startKeepAlive(episode.url, it, play.session)
         }
 
-        val videoHeaders = headersBuilder()
-            .set("Authorization", "Bearer ${token()}")
-            .build()
-
-        // A locale can appear in both maps, so merging them as maps would drop the
-        // dialogue track in favour of the CC one.
-        val subtitles = buildList {
-            play.subtitles.forEach { (locale, sub) -> add(Track(sub.url, localeName(locale))) }
-            play.captions.forEach { (locale, sub) -> add(Track(sub.url, "${localeName(locale)} (CC)")) }
-        }.sortedWith(compareByDescending { it.lang.startsWith(localeName(subtitleLocale)) })
-
         val offline = play.drm?.let { offlinePayload(episode.url) }
 
         val drmPayload = play.drm?.let { drm ->
@@ -417,14 +431,55 @@ class Crunchyroll : Source() {
             Log.w(LOG_TAG, "play response had DRM but no stream token - license will 403")
         }
 
+        val title = buildString {
+            append("Crunchyroll")
+            if (play.audioLocale.isNotEmpty()) append(" · ${localeName(play.audioLocale)}")
+            if (play.drm != null) append(" · DRM")
+        }
+
         return listOf(
-            legacyVideo(
+            Hoster(
+                hosterName = title,
+                internalData = play.url,
+                videoList = buildVideoList(play, drmPayload),
+            ),
+        )
+    }
+
+    override fun hosterListRequest(episode: SEpisode) = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response) = throw UnsupportedOperationException()
+
+    // ============================ Video Links =============================
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        return hoster.videoList ?: emptyList()
+    }
+
+    override fun videoListRequest(hoster: Hoster) = throw UnsupportedOperationException()
+    override fun videoListParse(response: Response, hoster: Hoster) = throw UnsupportedOperationException()
+
+    private fun buildVideoList(play: PlayResponseDto, drmPayload: String): List<Video> {
+        val videoHeaders = headersBuilder()
+            .set("Authorization", "Bearer ${token()}")
+            .build()
+
+        // A locale can appear in both maps, so merging them as maps would drop the
+        // dialogue track in favour of the CC one.
+        val subtitles = buildList {
+            play.subtitles.forEach { (locale, sub) -> add(Track(sub.url, localeName(locale))) }
+            play.captions.forEach { (locale, sub) -> add(Track(sub.url, "${localeName(locale)} (CC)")) }
+        }.sortedWith(compareByDescending { it.lang.startsWith(localeName(subtitleLocale)) })
+
+        val title = buildString {
+            append("Crunchyroll")
+            if (play.audioLocale.isNotEmpty()) append(" · ${localeName(play.audioLocale)}")
+            if (play.drm != null) append(" · DRM")
+        }
+
+        return listOf(
+            Video(
                 videoUrl = play.url,
-                videoTitle = buildString {
-                    append("Crunchyroll")
-                    if (play.audioLocale.isNotEmpty()) append(" · ${localeName(play.audioLocale)}")
-                    if (play.drm != null) append(" · DRM")
-                },
+                videoTitle = title,
                 headers = videoHeaders,
                 subtitleTracks = subtitles,
                 internalData = drmPayload,
