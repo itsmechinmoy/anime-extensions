@@ -221,7 +221,7 @@ class KissKH :
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                false
+                continue
             }
             if (isUnaired) {
                 firstAiredIndex = index + 1
