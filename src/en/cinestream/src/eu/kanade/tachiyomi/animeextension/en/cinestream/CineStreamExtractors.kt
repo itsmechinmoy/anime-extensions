@@ -4,13 +4,13 @@ import android.util.Base64
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import keiyoushi.utils.bodyString
 import keiyoushi.utils.get
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.post
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -26,6 +26,7 @@ import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.cancellation.CancellationException
 
 object CineStreamExtractors {
 
@@ -63,7 +64,7 @@ object CineStreamExtractors {
         baseHeaders: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             when (providerKey) {
                 "p_torrentio" -> extractTorrentio("https://torrentio.strem.fun/limit=4", "Torrentio", media, client)
                 "p_torrentsdb" -> extractTorrentio("https://torrentsdb.com/eyJsaW1pdCI6IjMiLCJkZWJyaWRvcHRpb25zIjpbIm5vZG93bmxvYWRsaW5rcyJdfQ==", "TorrentsDB", media, client)
@@ -82,7 +83,11 @@ object CineStreamExtractors {
                 "p_kisskh" -> extractKisskh(media, client, baseHeaders, playlistUtils)
                 else -> emptyList()
             }
-        }.getOrDefault(emptyList())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     // ── Torrentio & TorrentsDB ──────────────────────────────────────────────────
@@ -124,13 +129,19 @@ object CineStreamExtractors {
             media.episode?.let { addQueryParameter("ep", it.toString()) }
         }.build()
 
-        val array = runCatching { client.get(url.toString()).parseAs<JsonArray>() }.getOrNull() ?: return emptyList()
-        return array.mapNotNull { item ->
-            val obj = item.jsonObject
-            val title = obj["title"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            val magnet = obj["magnet_uri"]?.jsonPrimitive?.content
-                ?: obj["magnet_url"]?.jsonPrimitive?.content
-                ?: obj["torrent_url"]?.jsonPrimitive?.content
+        val list = try {
+            client.get(url.toString()).parseAs<List<AnimeToshoItemDto>>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+
+        return list.mapNotNull { item ->
+            val title = item.title ?: return@mapNotNull null
+            val magnet = item.magnetUri
+                ?: item.magnetUrl
+                ?: item.torrentUrl
                 ?: return@mapNotNull null
             Video(
                 videoUrl = magnet,
@@ -165,7 +176,7 @@ object CineStreamExtractors {
             "https://api.speedracelight.com/$server/sources-with-title?title=$encTitle&mediaType=tv&year=${media.year}&tmdbId=$tmdbId&episodeId=${media.episode ?: 1}&seasonId=${media.season ?: 1}&imdbId=${media.imdbId.orEmpty()}&enc=2&seed=$seed"
         }
 
-        val encData = client.get(endpoint, videasyHeaders).body.string()
+        val encData = client.get(endpoint, videasyHeaders).bodyString()
         val decryptBody = buildJsonObject {
             put("text", encData)
             put("id", tmdbId)
@@ -209,8 +220,14 @@ object CineStreamExtractors {
         SecureRandom().nextBytes(keyBytes)
         val key = keyBytes.joinToString("") { "%02x".format(it) }
 
-        val tokenResp = client.get("https://enc-dec.app/api/enc-hexa").parseAs<JsonObject>()
-        val token = tokenResp["result"]?.jsonObject?.get("token")?.jsonPrimitive?.content ?: ""
+        val tokenResp = try {
+            client.get("https://enc-dec.app/api/enc-hexa").parseAs<EncDecResponse>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        val token = tokenResp?.result?.token.orEmpty()
 
         val hexaHeaders = headers.newBuilder()
             .set("X-Api-Key", key)
@@ -219,7 +236,7 @@ object CineStreamExtractors {
             .set("X-Cap-Token", token)
             .build()
 
-        val encData = client.get(url, hexaHeaders).body.string()
+        val encData = client.get(url, hexaHeaders).bodyString()
         val decryptBody = buildJsonObject {
             put("text", encData)
             put("key", key)
@@ -253,9 +270,13 @@ object CineStreamExtractors {
             .set("Referer", "https://vidrock.ru/")
             .build()
 
-        val obj = runCatching {
+        val obj = try {
             client.get(apiUrl, vidrockHeaders).parseAs<JsonObject>()
-        }.getOrNull() ?: return emptyList()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
 
         val videos = mutableListOf<Video>()
         for ((serverName, serverElement) in obj) {
@@ -326,7 +347,7 @@ object CineStreamExtractors {
         } else {
             "https://vidfast.vc/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}/"
         }
-        val doc = Jsoup.parse(client.get(url).body.string())
+        val doc = Jsoup.parse(client.get(url).bodyString())
         val iframe = doc.selectFirst("iframe")?.attr("src") ?: return emptyList()
         return if (iframe.contains(".m3u8")) {
             playlistUtils.extractFromHls(iframe)
@@ -348,65 +369,47 @@ object CineStreamExtractors {
             .set("Referer", "https://peachify.top/")
             .build()
 
-        val servers = listOf("multi", "hr", "holly", "air", "moviebox")
+        val isMovie = media.tvtype == "movie"
+        val servers = listOf("alpha", "delta")
         val videos = mutableListOf<Video>()
 
-        for (server in servers) {
-            val url = if (media.tvtype == "movie") {
-                "https://x.eat-peach.sbs/$server/movie/$tmdbId"
+        for (srv in servers) {
+            val url = if (isMovie) {
+                "https://peachify.top/api/stream/$srv?id=$tmdbId"
             } else {
-                "https://x.eat-peach.sbs/$server/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
+                "https://peachify.top/api/stream/$srv?id=$tmdbId&s=${media.season ?: 1}&e=${media.episode ?: 1}"
             }
-            val text = runCatching { client.get(url, peachHeaders).body.string() }.getOrNull() ?: continue
-            val encrypt = runCatching { text.parseAs<JsonObject>()["data"]?.jsonPrimitive?.content }.getOrNull() ?: continue
-            if (encrypt.isNullOrBlank()) continue
+            val text = try {
+                client.get(url, peachHeaders).bodyString()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                continue
+            }
+            if (text.isBlank()) continue
 
-            val decrypted = decryptPeachifyUrl(encrypt) ?: continue
-            val decryptedObj = runCatching { decrypted.parseAs<JsonObject>() }.getOrNull() ?: continue
-            val streamUrl = decryptedObj["url"]?.jsonPrimitive?.content ?: continue
-            if (streamUrl.contains(".m3u8")) {
+            val decUrl = decryptPeachify(text) ?: continue
+            if (decUrl.contains(".m3u8")) {
                 videos += playlistUtils.extractFromHls(
-                    streamUrl,
+                    decUrl,
                     masterHeaders = peachHeaders,
                     videoHeaders = peachHeaders,
-                    videoNameGen = { q -> "Peachify [$server] - $q" },
+                    videoNameGen = { q -> "Peachify [$srv] - $q" },
                 )
             } else {
-                videos += Video(videoUrl = streamUrl, videoTitle = "Peachify [$server]", headers = peachHeaders)
+                videos += Video(videoUrl = decUrl, videoTitle = "Peachify [$srv]", headers = peachHeaders)
             }
         }
         return videos
     }
 
-    private fun decryptPeachifyUrl(encrypt: String): String? {
-        return runCatching {
-            val parts = encrypt.split(".")
-            if (parts.size < 3) return null
-
-            fun b64Decode(s: String): ByteArray {
-                var padded = s.replace('-', '+').replace('_', '/')
-                val rem = padded.length % 4
-                if (rem != 0) padded += "=".repeat(4 - rem)
-                return Base64.decode(padded, Base64.DEFAULT)
-            }
-
-            val iv = b64Decode(parts[0])
-            val cipherData = b64Decode(parts[1]) + b64Decode(parts[2])
-
-            val keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d"
-            val keyBytes = ByteArray(keyHex.length / 2) { i ->
-                keyHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
-            }
-
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                SecretKeySpec(keyBytes, "AES"),
-                GCMParameterSpec(128, iv),
-            )
-            String(cipher.doFinal(cipherData), Charsets.UTF_8)
-        }.getOrNull()
-    }
+    private fun decryptPeachify(encrypted: String): String? = runCatching {
+        val key = "peachifytopsecretkey2024".toByteArray(Charsets.UTF_8).copyOf(32)
+        val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"))
+        val dec = cipher.doFinal(Base64.decode(encrypted.trim(), Base64.DEFAULT))
+        String(dec, Charsets.UTF_8)
+    }.getOrNull()
 
     // ── Vidzee ─────────────────────────────────────────────────────────────────
     private suspend fun extractVidzee(
@@ -416,16 +419,16 @@ object CineStreamExtractors {
     ): List<Video> {
         val tmdbId = media.tmdbId ?: return emptyList()
         val url = if (media.tvtype == "movie") {
-            "https://player.vidzee.wtf/movie/$tmdbId"
+            "https://vidzee.org/movie/$tmdbId"
         } else {
-            "https://player.vidzee.wtf/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
+            "https://vidzee.org/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
         }
-        val doc = Jsoup.parse(client.get(url).body.string())
-        val stream = doc.selectFirst("source")?.attr("src") ?: return emptyList()
-        return if (stream.contains(".m3u8")) {
-            playlistUtils.extractFromHls(stream)
+        val doc = Jsoup.parse(client.get(url).bodyString())
+        val iframe = doc.selectFirst("iframe")?.attr("src") ?: return emptyList()
+        return if (iframe.contains(".m3u8")) {
+            playlistUtils.extractFromHls(iframe)
         } else {
-            listOf(Video(videoUrl = stream, videoTitle = "Vidzee"))
+            listOf(Video(videoUrl = iframe, videoTitle = "Vidzee"))
         }
     }
 
@@ -436,19 +439,19 @@ object CineStreamExtractors {
         headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
-        val id = media.imdbId ?: media.id
+        val tmdbId = media.tmdbId ?: return emptyList()
+        val vapHeaders = headers.newBuilder().set("Referer", "https://vaplayer.com/").build()
         val url = if (media.tvtype == "movie") {
-            "https://streamdata.vaplayer.ru/movie/$id"
+            "https://vaplayer.com/movie/$tmdbId"
         } else {
-            "https://streamdata.vaplayer.ru/tv/$id/${media.season ?: 1}/${media.episode ?: 1}"
+            "https://vaplayer.com/tv/$tmdbId/${media.season ?: 1}/${media.episode ?: 1}"
         }
-        val vaHeaders = headers.newBuilder().set("Referer", "https://nextgencloudfabric.com/").build()
-        val obj = runCatching { client.get(url, vaHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
-        val streamUrl = obj["url"]?.jsonPrimitive?.content ?: return emptyList()
-        return if (streamUrl.contains(".m3u8")) {
-            playlistUtils.extractFromHls(streamUrl, masterHeaders = vaHeaders, videoHeaders = vaHeaders)
+        val doc = Jsoup.parse(client.get(url, vapHeaders).bodyString())
+        val src = doc.selectFirst("iframe")?.attr("src") ?: return emptyList()
+        return if (src.contains(".m3u8")) {
+            playlistUtils.extractFromHls(src, masterHeaders = vapHeaders, videoHeaders = vapHeaders)
         } else {
-            listOf(Video(videoUrl = streamUrl, videoTitle = "VaPlayer", headers = vaHeaders))
+            listOf(Video(videoUrl = src, videoTitle = "VaPlayer", headers = vapHeaders))
         }
     }
 
@@ -462,7 +465,13 @@ object CineStreamExtractors {
         if (media.tvtype != "movie") return emptyList()
         val searchUrl = "https://api.hlowb.com/film-api/v1.1.0/movie/searchByKeyword?channel=IndiaA&clientType=1&keyword=${URLEncoder.encode(media.title, "UTF-8")}&lang=en-US&mode=1&packageName=com.external.castle&page=1&size=10"
         val castleHeaders = headers.newBuilder().set("Referer", "https://api.hlowb.com/").build()
-        val searchResp = runCatching { client.get(searchUrl, castleHeaders).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
+        val searchResp = try {
+            client.get(searchUrl, castleHeaders).parseAs<JsonObject>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
         val rows = searchResp["rows"]?.jsonArray ?: return emptyList()
         val firstId = rows.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return emptyList()
 
@@ -475,7 +484,13 @@ object CineStreamExtractors {
             put("packageName", "com.external.castle")
         }.toJsonRequestBody()
 
-        val videoResp = runCatching { client.post(videoUrl, headers = castleHeaders, body = body).parseAs<JsonObject>() }.getOrNull() ?: return emptyList()
+        val videoResp = try {
+            client.post(videoUrl, headers = castleHeaders, body = body).parseAs<JsonObject>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
         val streamUrl = videoResp["videoUrl"]?.jsonPrimitive?.content ?: return emptyList()
         return if (streamUrl.contains(".m3u8")) {
             playlistUtils.extractFromHls(streamUrl, masterHeaders = castleHeaders, videoHeaders = castleHeaders)
@@ -489,19 +504,38 @@ object CineStreamExtractors {
         media: MediaPayload,
         client: OkHttpClient,
     ): List<Video> {
-        val tvtype = if (media.tvtype == "movie") "_(Movie)" else "_(TV)"
-        val firstChar = media.title.firstOrNull()?.uppercaseChar()?.toString() ?: "0"
-        val newTitle = media.title.replace(" ", "_")
-        val doc = Jsoup.parse(client.get("https://www.tokyoinsider.com/anime/$firstChar/$newTitle$tvtype").body.string())
+        val title = media.title.trim()
+        val firstChar = title.firstOrNull()?.uppercaseChar()?.toString() ?: return emptyList()
+        val newTitle = title.lowercase().replace(" ", "_")
+        val tvtype = if (media.tvtype == "movie") "_movie" else ""
 
-        val selector = if (media.episode != null) "a.download-link:matches((?i)(episode ${media.episode}\\b))" else "a.download-link"
-        val aTag = doc.selectFirst(selector) ?: doc.selectFirst("a.download-link") ?: return emptyList()
-        val epUrl = aTag.attr("href")
-        val resDoc = Jsoup.parse(client.get("https://www.tokyoinsider.com$epUrl").body.string())
-        return resDoc.select("div.c_h2 > div > a").map {
-            val name = it.text()
-            val dlUrl = it.attr("href")
-            Video(videoUrl = dlUrl, videoTitle = "TokyoInsider - $name")
+        val doc = try {
+            Jsoup.parse(client.get("https://www.tokyoinsider.com/anime/$firstChar/$newTitle$tvtype").bodyString())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val episodeNum = media.episode ?: 1
+        val epLink = doc.select("a").firstOrNull { it.text().contains("Episode $episodeNum", true) } ?: return emptyList()
+        val epUrl = epLink.attr("href")
+
+        val resDoc = try {
+            Jsoup.parse(client.get("https://www.tokyoinsider.com$epUrl").bodyString())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val downloadLinks = resDoc.select("a[href*=/download/]")
+        return downloadLinks.mapNotNull { a ->
+            val href = a.attr("href")
+            val quality = a.text().trim()
+            if (href.isNotBlank()) {
+                Video(videoUrl = "https://www.tokyoinsider.com$href", videoTitle = "TokyoInsider - $quality")
+            } else {
+                null
+            }
         }
     }
 
@@ -544,10 +578,14 @@ object CineStreamExtractors {
         return servers.flatMap { server ->
             val code = server.code ?: return@flatMap emptyList()
             val type = server.types.firstOrNull() ?: "sub"
-            val srcResp = runCatching {
+            val srcResp = try {
                 client.get("https://api.just4anime.online/api/v1/meta/sources/$anilistId?provider=$code&num=${media.episode ?: 1}&type=$type", j4Headers)
                     .parseAs<Just4AnimeSourcesResponse>()
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
 
             val multi = srcResp?.data?.stream?.multi.orEmpty()
             val subs = srcResp?.data?.stream?.subtitles.orEmpty().mapNotNull { track ->
@@ -573,25 +611,60 @@ object CineStreamExtractors {
         headers: Headers,
         playlistUtils: PlaylistUtils,
     ): List<Video> {
-        val kHeaders = headers.newBuilder().set("Referer", "https://kisskh.nl/").build()
-        val searchResp = runCatching {
-            client.get("https://kisskh.nl/api/DramaList/Search?q=${URLEncoder.encode(media.title, "UTF-8")}&type=0", kHeaders).parseAs<JsonArray>()
-        }.getOrNull() ?: return emptyList()
-        val firstId = searchResp.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return emptyList()
+        val kHeaders = headers.newBuilder()
+            .set("Origin", "https://kisskh.ovh")
+            .set("Referer", "https://kisskh.ovh/")
+            .build()
 
-        val detailResp = client.get("https://kisskh.nl/api/DramaList/Drama/$firstId?isq=false", kHeaders).parseAs<JsonObject>()
-        val eps = detailResp["episodes"]?.jsonArray ?: return emptyList()
+        val searchUrl = "https://kisskh.ovh/api/DramaList/Search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", media.title)
+            .addQueryParameter("type", "0")
+            .build()
 
-        val epNumber = media.episode ?: 1
-        val epObj = eps.firstOrNull { it.jsonObject["number"]?.jsonPrimitive?.content?.toIntOrNull() == epNumber }
-            ?: eps.firstOrNull() ?: return emptyList()
-        val epId = epObj.jsonObject["id"]?.jsonPrimitive?.content ?: return emptyList()
+        val searchResp = try {
+            client.get(searchUrl.toString(), kHeaders).parseAs<List<KisskhSearchItemDto>>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
 
-        val keyResp = client.get("https://enc-dec.app/api/enc-kisskh?text=$epId&type=vid", kHeaders).parseAs<JsonObject>()
-        val vidKey = keyResp["result"]?.jsonPrimitive?.content ?: return emptyList()
+        val firstId = searchResp.firstOrNull()?.id ?: return emptyList()
 
-        val srcResp = client.get("https://kisskh.nl/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$vidKey", kHeaders).parseAs<JsonObject>()
-        val videoLink = srcResp["video"]?.jsonPrimitive?.content ?: return emptyList()
+        val detailResp = try {
+            client.get("https://kisskh.ovh/api/DramaList/Drama/$firstId?isq=false", kHeaders)
+                .parseAs<KisskhDetailDto>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+
+        val epNumber = (media.episode ?: 1).toFloat()
+        val ep = detailResp.episodes.firstOrNull { it.number == epNumber }
+            ?: detailResp.episodes.firstOrNull()
+            ?: return emptyList()
+        val epId = ep.id ?: return emptyList()
+
+        val keyResp = try {
+            client.get("https://enc-dec.app/api/enc-kisskh?text=$epId&type=vid", kHeaders)
+                .parseAs<EncDecSingleResultResponse>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val vidKey = keyResp.result ?: return emptyList()
+
+        val srcResp = try {
+            client.get("https://kisskh.ovh/api/DramaList/Episode/$epId.png?err=false&ts=&time=&kkey=$vidKey", kHeaders)
+                .parseAs<KisskhVideoDto>()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val videoLink = srcResp.video ?: return emptyList()
 
         return if (videoLink.contains(".m3u8")) {
             playlistUtils.extractFromHls(videoLink, masterHeaders = kHeaders, videoHeaders = kHeaders)
