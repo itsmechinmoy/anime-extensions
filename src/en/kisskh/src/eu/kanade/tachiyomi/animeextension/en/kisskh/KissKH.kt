@@ -24,8 +24,6 @@ import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -259,14 +257,12 @@ class KissKH :
 
     override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> = coroutineScope {
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val id = hoster.internalData
-        val videoUrl = hoster.hosterUrl.takeIf(String::isNotBlank) ?: return@coroutineScope emptyList()
+        val videoUrl = hoster.hosterUrl.takeIf(String::isNotBlank) ?: return emptyList()
 
-        val subKeyDeferred = async { requestSubKey(id) }
-
-        val subList = runCatching {
-            val subKey = subKeyDeferred.await()
+        val subList = try {
+            val subKey = requestSubKey(id)
             client.get("$baseUrl/api/Sub/$id?kkey=$subKey")
                 .parseAs<List<SubtitleDto>>()
                 .parallelCatchingMapNotNull { item ->
@@ -278,9 +274,13 @@ class KissKH :
                         Track(suburl, lang)
                     }
                 }
-        }.getOrDefault(emptyList())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
 
-        UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
+        return UrlUtils.fixUrl(videoUrl)?.let { fixedVideoUrl ->
             Video(
                 videoUrl = fixedVideoUrl,
                 videoTitle = "FirstParty",
