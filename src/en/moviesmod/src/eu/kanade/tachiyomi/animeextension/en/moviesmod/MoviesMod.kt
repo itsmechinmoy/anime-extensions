@@ -252,8 +252,7 @@ class MoviesMod : Source() {
     }
 
     // =========================== Hosters & Videos ==========================
-    override suspend fun getHosterList(episode: SEpisode): List<Hoster> =
-        listOf(Hoster(hosterName = "Default", hosterUrl = episode.url))
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(Hoster(hosterName = "Default", hosterUrl = episode.url))
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val urlJson = runCatching { json.decodeFromString<EpLinks>(hoster.hosterUrl) }.getOrNull()
@@ -405,8 +404,7 @@ class MoviesMod : Source() {
 
     private fun EpLinks.toJson(): String = json.encodeToString(this)
 
-    private fun getDomainPrefSummary(): String =
-        preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT) ?: PREF_DOMAIN_DEFAULT
+    private fun getDomainPrefSummary(): String = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT) ?: PREF_DOMAIN_DEFAULT
 
     companion object {
         private val SIZE_REGEX = """\[((?:.(?!\[))+)]*$""".toRegex(RegexOption.IGNORE_CASE)
