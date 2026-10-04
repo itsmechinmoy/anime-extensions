@@ -261,7 +261,7 @@ class MoviesMod : Source() {
         return urlJson.urls.parallelCatchingFlatMap { eplink ->
             val mediaUrl = getMediaUrl(eplink) ?: return@parallelCatchingFlatMap emptyList()
             extractVideos(mediaUrl, eplink.quality)
-        }.sortVideos()
+        }.sortVideosByPreference()
     }
 
     private suspend fun extractVideos(fileUrl: String, quality: String): List<Video> {
@@ -336,7 +336,7 @@ class MoviesMod : Source() {
         return "https://" + mediaResponse.request.url.host + path
     }
 
-    private fun List<Video>.sortVideos(): List<Video> {
+    private fun List<Video>.sortVideosByPreference(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
         val ascSort = (preferences.getString(PREF_SIZE_SORT_KEY, PREF_SIZE_SORT_DEFAULT) ?: PREF_SIZE_SORT_DEFAULT) == "asc"
 
