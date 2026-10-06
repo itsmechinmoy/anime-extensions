@@ -148,8 +148,6 @@ class MoviesMod : Source() {
     }
 
     // ============================== Episodes ==============================
-    // Episode logic below is identical to main (blocking calls + parallelMapNotNullBlocking),
-    // only wrapped in withContext(Dispatchers.IO) for the suspend signature.
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = withContext(Dispatchers.IO) {
         val doc = client.newCall(GET(currentBaseUrl + anime.url, headers)).execute().asJsoup()
         // Original selector + fallback for site redesign / domain change
@@ -411,7 +409,6 @@ class MoviesMod : Source() {
     private fun getDomainPrefSummary(): String = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT) ?: PREF_DOMAIN_DEFAULT
 
     companion object {
-        // Same behavior as main: the trailing \$ is a literal dollar sign
         private val SIZE_REGEX = """\[((?:.(?!\[))+)]*\$""".toRegex(RegexOption.IGNORE_CASE)
 
         private const val PREF_DOMAIN_KEY = "pref_domain_new"
