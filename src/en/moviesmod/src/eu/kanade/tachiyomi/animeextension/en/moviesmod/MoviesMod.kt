@@ -32,7 +32,7 @@ class MoviesMod : Source() {
 
     override val id = 2828515480418041073L
 
-    override val name = "MoviesMod"
+    override val name = "Movies Mod"
 
     override val lang = "en"
 
