@@ -18,6 +18,7 @@ import keiyoushi.utils.Source
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.parallelCatchingFlatMap
+import keiyoushi.utils.parallelMapNotNullBlocking
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -147,9 +148,10 @@ class MoviesMod : Source() {
     }
 
     // ============================== Episodes ==============================
-    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val response = client.get(currentBaseUrl + anime.url, headers)
-        val doc = response.asJsoup()
+    // Episode logic below is identical to main (blocking calls + parallelMapNotNullBlocking),
+    // only wrapped in withContext(Dispatchers.IO) for the suspend signature.
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = withContext(Dispatchers.IO) {
+        val doc = client.newCall(GET(currentBaseUrl + anime.url, headers)).execute().asJsoup()
         // Original selector + fallback for site redesign / domain change
         val episodeElements = doc.select("p:has(a.maxbutton-episode-links,a.maxbutton-download-links)")
             .ifEmpty { doc.select("p:has(a[class*=maxbutton])") }
@@ -159,61 +161,63 @@ class MoviesMod : Source() {
             throw Exception("No episode links found. Site may have changed or is behind Cloudflare.")
         }
 
-        val qualityRegex = """\d{3,4}p(?:\s+\w+)?""".toRegex(RegexOption.IGNORE_CASE)
-        val seasonRegex = """[ .]?S(?:eason)?[ .]?(\d{1,2})[ .]?""".toRegex(RegexOption.IGNORE_CASE)
-        val movieTitleRegex = """^[^(]+\n?""".toRegex(RegexOption.IGNORE_CASE)
+        val qualityRegex = "\\d{3,4}p(?:\\s+\\w+)?".toRegex(RegexOption.IGNORE_CASE)
+        val seasonRegex = "[ .]?S(?:eason)?[ .]?(\\d{1,2})[ .]?".toRegex(RegexOption.IGNORE_CASE)
+        val movieTitleRegex = "^[^(]+\n?".toRegex(RegexOption.IGNORE_CASE)
 
         // Safe check for series vs movie; avoid NPE on empty or missing text
         val isSerie = episodeElements.firstOrNull()?.selectFirst("a")?.text()?.equals("Episode Links", ignoreCase = true) == true
 
         // Parallelize child-page fetches to avoid performance regression vs sequential Jsoup.connect
         val childPageLoaded = AtomicBoolean(false)
-        val triples = episodeElements.toList().parallelCatchingFlatMap { row ->
-            val prevP = row.previousElementSiblings()
-                .firstOrNull { it.text().isNotBlank() }?.text().orEmpty()
+        val triples = episodeElements.toList().parallelMapNotNullBlocking { row ->
+            runCatching {
+                val prevP = row.previousElementSiblings()
+                    .firstOrNull { it.text().isNotBlank() }?.text().orEmpty()
 
-            val quality = qualityRegex.find(prevP)?.value ?: "HD"
-            val defaultName = if (isSerie) {
-                seasonRegex.find(prevP)?.value ?: "Season 1"
-            } else {
-                movieTitleRegex.find(prevP.replace("Download", "").trim())?.value ?: "Movie"
-            }
-
-            val episodePageUrl = row.selectFirst("a[href]")?.attr("abs:href")?.takeUnless { it.isBlank() }
-                ?: return@parallelCatchingFlatMap emptyList()
-
-            val childUrl = extractChildUrl(episodePageUrl)
-
-            val episodePageDocument = runCatching {
-                client.get(childUrl, headers).asJsoup()
-            }.getOrNull() ?: return@parallelCatchingFlatMap emptyList()
-            childPageLoaded.set(true)
-
-            val links = episodePageDocument.select("div.timed-content-client_show_0_5_0 a")
-                .ifEmpty {
-                    episodePageDocument.select("""a[href*="?sid="], a[href*="r?key="]""")
-                }
-
-            links.mapIndexedNotNull { index, linkElement ->
-                val episode = if (isSerie) {
-                    linkElement.text()
-                        .replace("Episode", "", true)
-                        .trim()
-                        .toIntOrNull() ?: (index + 1)
+                val quality = qualityRegex.find(prevP)?.value ?: "HD"
+                val defaultName = if (isSerie) {
+                    seasonRegex.find(prevP)?.value ?: "Season 1"
                 } else {
-                    0
+                    movieTitleRegex.find(prevP.replace("Download", "").trim())?.value ?: "Movie"
                 }
 
-                val url = linkElement.attr("abs:href").takeUnless(String::isBlank)
-                    ?: return@mapIndexedNotNull null
+                val episodePageUrl = row.selectFirst("a[href]")?.attr("abs:href")?.takeUnless { it.isBlank() }
+                    ?: return@parallelMapNotNullBlocking null
 
-                Triple(
-                    Pair(defaultName, episode),
-                    url,
-                    if (isSerie) quality else "$quality ${linkElement.text()}".trim(),
-                )
-            }
-        }
+                val childUrl = extractChildUrl(episodePageUrl)
+
+                val episodePageDocument = runCatching {
+                    client.newCall(GET(childUrl, headers)).execute().asJsoup()
+                }.getOrNull() ?: return@parallelMapNotNullBlocking null
+                childPageLoaded.set(true)
+
+                val links = episodePageDocument.select("div.timed-content-client_show_0_5_0 a")
+                    .ifEmpty {
+                        episodePageDocument.select("""a[href*="?sid="], a[href*="r?key="]""")
+                    }
+
+                links.mapIndexedNotNull { index, linkElement ->
+                    val episode = if (isSerie) {
+                        linkElement.text()
+                            .replace("Episode", "", true)
+                            .trim()
+                            .toIntOrNull() ?: (index + 1)
+                    } else {
+                        0
+                    }
+
+                    val url = linkElement.attr("abs:href").takeUnless(String::isBlank)
+                        ?: return@mapIndexedNotNull null
+
+                    Triple(
+                        Pair(defaultName, episode),
+                        url,
+                        if (isSerie) quality else "$quality ${linkElement.text()}".trim(),
+                    )
+                }
+            }.getOrNull()
+        }.flatten()
 
         val grouped = triples.groupBy { it.first }.values.mapIndexed { index, items ->
             val (itemName, episodeNum) = items.first().first
@@ -240,12 +244,12 @@ class MoviesMod : Source() {
                 },
             )
         }
-        return grouped.reversed()
+        grouped.reversed()
     }
 
     private fun extractChildUrl(mainUrl: String): String {
         return runCatching {
-            val urlParam = mainUrl.toHttpUrl().queryParameter("url") ?: return@runCatching mainUrl
+            val urlParam = mainUrl.toHttpUrl().queryParameter("url") ?: return mainUrl
             val flags = if (urlParam.contains("-") || urlParam.contains("_")) Base64.URL_SAFE else Base64.DEFAULT
             String(Base64.decode(urlParam, flags))
         }.getOrDefault(mainUrl)
@@ -407,7 +411,8 @@ class MoviesMod : Source() {
     private fun getDomainPrefSummary(): String = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT) ?: PREF_DOMAIN_DEFAULT
 
     companion object {
-        private val SIZE_REGEX = """\[((?:.(?!\[))+)]*$""".toRegex(RegexOption.IGNORE_CASE)
+        // Same behavior as main: the trailing \$ is a literal dollar sign
+        private val SIZE_REGEX = """\[((?:.(?!\[))+)]*\$""".toRegex(RegexOption.IGNORE_CASE)
 
         private const val PREF_DOMAIN_KEY = "pref_domain_new"
         private const val PREF_DOMAIN_TITLE = "Currently used domain"
