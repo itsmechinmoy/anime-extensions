@@ -230,6 +230,12 @@ class MoviesMod : Source() {
                 name = if (isSerie) "$itemName Ep $episodeNum" else itemName
 
                 episode_number = if (isSerie) episodeNum.toFloat() else (index + 1).toFloat()
+
+                scanlator = if (isSerie) {
+                    seasonRegex.find(itemName)?.groupValues?.get(1)?.let { "Season $it" } ?: itemName.trim()
+                } else {
+                    null
+                }
             }
         }
 
