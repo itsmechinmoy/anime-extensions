@@ -8,8 +8,8 @@ import keiyoushi.utils.addSwitchPreference
 
 internal const val PREF_DOMAIN_KEY = "preferred_domain"
 internal const val PREF_DOMAIN_DEFAULT = "https://av1encodes.com"
-internal val DOMAIN_ENTRIES = listOf("av1encodes.com (default)", "av1please.com (mirror)")
-internal val DOMAIN_VALUES = listOf("https://av1encodes.com", "https://av1please.com")
+internal val DOMAIN_ENTRIES = listOf("av1encodes.com (default)", "animealpha.cc", "av1please.com (mirror)")
+internal val DOMAIN_VALUES = listOf("https://av1encodes.com", "https://animealpha.cc", "https://av1please.com")
 
 internal const val PREF_QUALITY_KEY = "preferred_quality"
 internal val QUALITY_ENTRIES = listOf("1080p", "720p", "480p", "360p")
