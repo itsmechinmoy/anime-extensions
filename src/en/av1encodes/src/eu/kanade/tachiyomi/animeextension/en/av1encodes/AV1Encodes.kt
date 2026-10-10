@@ -66,37 +66,26 @@ class AV1Encodes : Source() {
         .build()
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .set("User-Agent", DESKTOP_UA)
-        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-        .add("Accept-Language", "en-US,en;q=0.9")
         .add("Referer", "$baseUrl/")
-        .add("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-        .add("Sec-Ch-Ua-Mobile", "?0")
-        .add("Sec-Ch-Ua-Platform", "\"Windows\"")
-        .add("Sec-Fetch-Dest", "document")
-        .add("Sec-Fetch-Mode", "navigate")
-        .add("Sec-Fetch-Site", "same-origin")
-        .add("Sec-Fetch-User", "?1")
-        .add("Upgrade-Insecure-Requests", "1")
 
     // ============================== Popular ===============================
 
     override suspend fun getPopularAnime(page: Int): AnimesPage = if (page == 1) {
-        val response = client.get(baseUrl, headers)
+        val response = client.get(baseUrl)
         val animes = parseCardList(response.useAsJsoup()).animes
         AnimesPage(animes, true)
     } else {
-        val response = client.get("$baseUrl/anime?page=${page - 1}", headers)
+        val response = client.get("$baseUrl/anime?page=${page - 1}")
         parseAnimeListPage(response.useAsJsoup())
     }
 
     // =============================== Latest ===============================
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage = if (page == 1) {
-        val response = client.get(baseUrl, headers)
+        val response = client.get(baseUrl)
         parseCardList(response.useAsJsoup())
     } else {
-        val response = client.get("$baseUrl/anime?page=$page", headers)
+        val response = client.get("$baseUrl/anime?page=${page - 1}")
         parseAnimeListPage(response.useAsJsoup())
     }
 
@@ -129,7 +118,7 @@ class AV1Encodes : Source() {
             builder.build()
         }
 
-        val response = client.get(url, headers)
+        val response = client.get(url)
         val doc = response.useAsJsoup()
         return if (url.encodedPath == "/anime") {
             parseAnimeListPage(doc)
@@ -153,7 +142,7 @@ class AV1Encodes : Source() {
             val titleEl = el.selectFirst(".spotlight-title, h3, h4") ?: a.selectFirst("h3, h4") ?: a
             SAnime.create().apply {
                 setUrlWithoutDomain(href)
-                title = titleEl.text().trim()
+                title = titleEl.text()
                 thumbnail_url = extractImgUrl(img)
             }
         }.distinctBy { it.url }
@@ -173,7 +162,7 @@ class AV1Encodes : Source() {
                 val img = block.parent()?.selectFirst("img") ?: block.selectFirst("img")
                 SAnime.create().apply {
                     setUrlWithoutDomain(href)
-                    title = h3.text().trim()
+                    title = h3.text()
                     thumbnail_url = extractImgUrl(img)
                 }
             }.distinctBy { it.url }
@@ -208,7 +197,7 @@ class AV1Encodes : Source() {
         return parallelMapNotNull { anime ->
             runCatching {
                 if (anime.thumbnail_url != null) return@runCatching anime
-                val doc = client.get(baseUrl + anime.url, headers).useAsJsoup()
+                val doc = client.get(baseUrl + anime.url).useAsJsoup()
                 val img = doc.selectFirst(
                     "img.anime-poster, img.poster, .anime-hero img, " +
                         "[class*='poster'] img, [class*='hero'] img, main img",
@@ -216,7 +205,7 @@ class AV1Encodes : Source() {
                 anime.thumbnail_url = extractImgUrl(img)
                     ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
                 anime
-            }.getOrNull()
+            }.getOrElse { anime }
         }
     }
 
@@ -226,11 +215,11 @@ class AV1Encodes : Source() {
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
         val animeUrl = if (anime.url.startsWith("http")) anime.url else baseUrl + anime.url
-        val doc = client.get(animeUrl, headers).useAsJsoup()
+        val doc = client.get(animeUrl).useAsJsoup()
         return SAnime.create().apply {
             title = doc.selectFirst(
                 ".anime-hero h1, h1.anime-title, [class*='anime-hero'] h1, [class*='detail'] h1, main h1, h1",
-            )?.text()?.trim() ?: anime.title
+            )?.text() ?: anime.title
 
             val img = doc.selectFirst(
                 "img.anime-poster, img.poster, .anime-hero img, [class*='poster'] img, [class*='hero'] img, main img",
@@ -245,15 +234,15 @@ class AV1Encodes : Source() {
 
             description = doc.selectFirst(
                 ".anime-synopsis, .synopsis, .description, [class*='synopsis'], [class*='description'], [class*='overview'], .desc",
-            )?.text()?.trim()
+            )?.text()
             genre = doc.select(
                 ".genre-tag, .tag, a[href*='/genre/'], a[href*='/tag/'], [class*='genre'] a, link[rel='tag'][href*='/genre/']",
             ).map { el ->
-                if (el.tagName() == "link") el.attr("href").substringAfterLast("/").replaceFirstChar { it.uppercase() } else el.text().trim()
+                if (el.tagName() == "link") el.attr("href").substringAfterLast("/").replaceFirstChar { it.uppercase() } else el.text()
             }.distinct().filter { it.isNotBlank() }.joinToString().ifBlank {
                 doc.selectFirst("p.anime-meta")?.text()?.substringAfter("Genre:")?.substringBefore("|")?.trim()
             }?.ifBlank { null }
-            author = doc.selectFirst(".studio, .studio-name, [class*='studio']")?.text()?.trim()
+            author = doc.selectFirst(".studio, .studio-name, [class*='studio']")?.text()
             status = if (doc.selectFirst("[class*='airing'], .status-airing, .airing-badge") != null) {
                 SAnime.ONGOING
             } else {
@@ -268,7 +257,7 @@ class AV1Encodes : Source() {
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val animeUrl = if (anime.url.startsWith("http")) anime.url else baseUrl + anime.url
-        val doc = client.get(animeUrl, headers).useAsJsoup()
+        val doc = client.get(animeUrl).useAsJsoup()
         val slug = anime.url.trim('/').split("/").last { it.isNotBlank() }
 
         val seasons = doc.select(".season-tab[data-season], .season-option[data-season], [data-season]")
@@ -278,7 +267,6 @@ class AV1Encodes : Source() {
             .ifEmpty { listOf("1") }
 
         val resolutionCandidates = qualityCandidates(prefQuality)
-        val episodeNumberRegex = Regex("""E(\d+)""", RegexOption.IGNORE_CASE)
 
         return seasons.sortedByDescending { it.toIntOrNull() ?: 0 }.parallelCatchingFlatMap { season ->
             var epHtml = ""
@@ -288,7 +276,8 @@ class AV1Encodes : Source() {
             for (res in resolutionCandidates) {
                 selectedRes = res
                 val epPageUrl = "$baseUrl/episodes/$slug/$season/$res"
-                val html = runCatching { client.get(epPageUrl, headers).bodyString() }.getOrNull() ?: continue
+                val html = runCatching { client.get(epPageUrl).bodyString() }.getOrNull() ?: continue
+                epHtml = html
 
                 if (html.trim().startsWith("[")) {
                     val items = runCatching { html.parseAs<List<EpisodeItem>>() }.getOrNull()
@@ -307,7 +296,6 @@ class AV1Encodes : Source() {
                 val parsed = Jsoup.parse(html)
                 val links = parsed.select("a[href*='/download/']")
                 if (links.isNotEmpty()) {
-                    epHtml = html
                     downloadLinks = links
                     break
                 }
@@ -328,7 +316,7 @@ class AV1Encodes : Source() {
             }
 
             downloadLinks.sortedByDescending { link ->
-                episodeNumberRegex.find(link.attr("href"))?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                EPISODE_NUMBER_REGEX.find(link.attr("href"))?.groupValues?.get(1)?.toIntOrNull() ?: 0
             }.map { link ->
                 val fullHref = link.attr("href")
                 val filename = Uri.decode(fullHref.substringAfterLast("/").substringBefore("?"))
@@ -361,10 +349,7 @@ class AV1Encodes : Source() {
 
         val downloadPageUrl = baseUrl + episodeUrl
         val pageHtml = try {
-            client.get(
-                downloadPageUrl,
-                headers.newBuilder().set("Referer", "$baseUrl/").build(),
-            ).bodyString()
+            client.get(downloadPageUrl).bodyString()
         } catch (e: Exception) {
             Log.e(TAG, "getVideoList: download page failed — ${e.message}")
             return fallbackDirectUrl(episodeUrl, filename)
@@ -372,9 +357,8 @@ class AV1Encodes : Source() {
 
         val videos = mutableListOf<Video>()
 
-        val resLabel = Regex("""\[(\d+p)]""").find(filename)?.groupValues?.get(1) ?: prefQuality
-        val audioTag = Regex("""\[(Dual|Sub|Dub|Tri|Multi)]""", RegexOption.IGNORE_CASE)
-            .find(filename)?.groupValues?.get(1) ?: ""
+        val resLabel = RES_LABEL_REGEX.find(filename)?.groupValues?.get(1) ?: prefQuality
+        val audioTag = AUDIO_TAG_REGEX.find(filename)?.groupValues?.get(1) ?: ""
         val audioSuffix = if (audioTag.isNotBlank()) " [$audioTag]" else ""
         val qualBase = "AV1 · $resLabel$audioSuffix"
 
@@ -391,7 +375,7 @@ class AV1Encodes : Source() {
         }
 
         // 2. Also query get_ddl if token is found
-        val ddlToken = tokenRegex.find(pageHtml)?.groupValues?.get(1)
+        val ddlToken = TOKEN_REGEX.find(pageHtml)?.groupValues?.get(1)
         if (ddlToken != null) {
             val ddlUrl = "$baseUrl/get_ddl/$encodedFilename"
             val ddl = runCatching {
@@ -451,10 +435,7 @@ class AV1Encodes : Source() {
         if (path.isNullOrBlank()) return null
         val url = if (path.startsWith("/")) "$baseUrl$path" else path
         return runCatching {
-            client.get(
-                url,
-                headers.newBuilder().set("Referer", "$baseUrl/").build(),
-            ).use { resp ->
+            client.get(url).use { resp ->
                 resp.request.url.toString()
             }
         }.getOrNull()
@@ -462,17 +443,13 @@ class AV1Encodes : Source() {
 
     private fun fallbackDirectUrl(episodeUrl: String, filename: String): List<Video> {
         val fullUrl = baseUrl + episodeUrl
-        val resLabel = Regex("""\[(\d+p)]""").find(filename)?.groupValues?.get(1) ?: prefQuality
-        val audioTag = Regex("""\[(Dual|Sub|Dub)]""", RegexOption.IGNORE_CASE)
-            .find(filename)?.groupValues?.get(1) ?: ""
+        val resLabel = RES_LABEL_REGEX.find(filename)?.groupValues?.get(1) ?: prefQuality
+        val audioTag = AUDIO_TAG_REGEX.find(filename)?.groupValues?.get(1) ?: ""
         val label = "AV1 · $resLabel${if (audioTag.isNotBlank()) " [$audioTag]" else ""} · Direct DL"
         return listOf(Video(videoUrl = fullUrl, videoTitle = label))
     }
 
     // =========================== Extraction Helpers ========================
-
-    private val filenameRegex by lazy { Regex("""([a-zA-Z0-9_ \-\[\]().%]+?\.(?:mkv|mp4))""", RegexOption.IGNORE_CASE) }
-    private val tokenRegex by lazy { Regex("""['"](A{4,}[A-Za-z0-9_\-]{10,})['"]""") }
 
     private fun extractFilenames(html: String): List<String> {
         val filenames = mutableSetOf<String>()
@@ -483,42 +460,24 @@ class AV1Encodes : Source() {
         Jsoup.parse(html).select("a[href*='/download/']").forEach {
             addDecoded(it.attr("href").substringAfterLast("/").substringBefore("?"))
         }
-        filenameRegex.findAll(html).forEach { addDecoded(it.groupValues[1]) }
+        FILENAME_REGEX.findAll(html).forEach { addDecoded(it.groupValues[1]) }
         return filenames.toList()
     }
 
-    private val episodeNameRegex by lazy { Regex("""\[(?:S\d+-)?E(\d+)]\s*(.+?)\s*\[""") }
-    private val subdubRegex by lazy { Regex("""\[(Dual|Sub|Dub|English Dub)]""", RegexOption.IGNORE_CASE) }
-    private val qualityRegex by lazy { Regex("""\[\d{3,4}p].*""") }
-
     private fun buildEpisodeLabel(filename: String, season: String): String {
-        val epMatch = episodeNameRegex.find(filename)
+        val epMatch = EPISODE_NAME_REGEX.find(filename)
         return if (epMatch != null) {
             val e = epMatch.groupValues[1]
             val titlePart = epMatch.groupValues[2].trim()
-            val audioTag = subdubRegex.find(filename)?.groupValues?.get(1) ?: ""
+            val audioTag = SUBDUB_REGEX.find(filename)?.groupValues?.get(1) ?: ""
             "Season $season Ep $e - $titlePart${if (audioTag.isNotBlank()) " [$audioTag]" else ""}"
         } else {
-            val cleanName = filename.replace(qualityRegex, "").substringBeforeLast(".").trim()
+            val cleanName = filename.replace(QUALITY_REGEX, "").substringBeforeLast(".").trim()
             if (season != "1" && season.isNotBlank()) "Season $season - $cleanName" else cleanName
         }
     }
 
-    private val episodeSNumberRegex by lazy { Regex("""\[(?:S\d+-)?E(\d+)]""") }
-    private fun parseEpisodeNumber(filename: String): Float = episodeSNumberRegex.find(filename)?.groupValues?.get(1)?.toFloatOrNull() ?: 1f
-
-    private val cleanTitleRegex1 by lazy { Regex("""\s*·\s*\d+\s*downloads?.*""", RegexOption.IGNORE_CASE) }
-    private val cleanTitleRegex2 by lazy { Regex("""^\[[a-zA-Z0-9_\-]+]\s*""") }
-    private val cleanTitleRegex3 by lazy { Regex("""\s*\[\d{3,4}p].*""", RegexOption.IGNORE_CASE) }
-    private val cleanTitleRegex4 by lazy { Regex("""\.(mkv|mp4)$""", RegexOption.IGNORE_CASE) }
-
-    private fun extractCleanTitle(raw: String): String {
-        var cleaned = raw.replace(cleanTitleRegex1, "")
-        cleaned = cleaned.replace(cleanTitleRegex2, "")
-        cleaned = cleaned.replace(cleanTitleRegex3, "")
-        cleaned = cleaned.replace(cleanTitleRegex4, "")
-        return cleaned.trim()
-    }
+    private fun parseEpisodeNumber(filename: String): Float = EPISODE_S_NUMBER_REGEX.find(filename)?.groupValues?.get(1)?.toFloatOrNull() ?: 1f
 
     private fun extractImgUrl(img: Element?): String? {
         if (img == null) return null
@@ -526,19 +485,10 @@ class AV1Encodes : Source() {
         return src.takeIf { it.isNotBlank() }
     }
 
-    private fun getListImageUrl(anchor: Element): String? {
-        val img = anchor.selectFirst("img")
-        val url = extractImgUrl(img)
-        if (!url.isNullOrBlank()) return url
-        return extractBg(anchor) ?: anchor.allElements.firstNotNullOfOrNull { extractBg(it) }
-    }
-
-    private val backgroundUrlRegex by lazy { Regex("""url\(['"](.*?)['"]\)""") }
-
     private fun extractBg(el: Element): String? {
         val style = el.attr("style")
         if (!style.contains("background", ignoreCase = true)) return null
-        val match = backgroundUrlRegex.find(style) ?: return null
+        val match = BACKGROUND_URL_REGEX.find(style) ?: return null
         val url = match.groupValues[1].ifBlank { return null }
         return if (url.startsWith("http")) url else "$baseUrl/${url.removePrefix("/")}"
     }
@@ -592,7 +542,16 @@ class AV1Encodes : Source() {
 
     companion object {
         private const val TAG = "AV1Encodes"
-        private const val DESKTOP_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        private val RES_LABEL_REGEX = Regex("""\[(\d+p)]""")
+        private val AUDIO_TAG_REGEX = Regex("""\[(Dual|Sub|Dub|Tri|Multi)]""", RegexOption.IGNORE_CASE)
+        private val EPISODE_NUMBER_REGEX = Regex("""E(\d+)""", RegexOption.IGNORE_CASE)
+        private val EPISODE_S_NUMBER_REGEX = Regex("""\[(?:S\d+-)?E(\d+)]""")
+        private val EPISODE_NAME_REGEX = Regex("""\[(?:S\d+-)?E(\d+)]\s*(.+?)\s*\[""")
+        private val SUBDUB_REGEX = Regex("""\[(Dual|Sub|Dub|English Dub)]""", RegexOption.IGNORE_CASE)
+        private val QUALITY_REGEX = Regex("""\[\d{3,4}p].*""")
+        private val FILENAME_REGEX = Regex("""([a-zA-Z0-9_ \-\[\]().%]+?\.(?:mkv|mp4))""", RegexOption.IGNORE_CASE)
+        private val TOKEN_REGEX = Regex("""['"](A{4,}[A-Za-z0-9_\-]{10,})['"]""")
+        private val BACKGROUND_URL_REGEX = Regex("""url\(['"](.*?)['"]\)""")
     }
 }
