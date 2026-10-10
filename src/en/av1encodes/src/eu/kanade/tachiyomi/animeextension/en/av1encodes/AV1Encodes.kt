@@ -66,13 +66,27 @@ class AV1Encodes : Source() {
         .build()
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .set("User-Agent", DESKTOP_UA)
+        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+        .add("Accept-Language", "en-US,en;q=0.9")
         .add("Referer", "$baseUrl/")
+        .add("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+        .add("Sec-Ch-Ua-Mobile", "?0")
+        .add("Sec-Ch-Ua-Platform", "\"Windows\"")
+        .add("Sec-Fetch-Dest", "document")
+        .add("Sec-Fetch-Mode", "navigate")
+        .add("Sec-Fetch-Site", "same-origin")
+        .add("Sec-Fetch-User", "?1")
+        .add("Upgrade-Insecure-Requests", "1")
 
     // ============================== Popular ===============================
 
     override suspend fun getPopularAnime(page: Int): AnimesPage = if (page == 1) {
         val response = client.get(baseUrl)
-        val animes = parseCardList(response.useAsJsoup()).animes
+        val animes = parseCardList(
+            response.useAsJsoup(),
+            selector = "article.spotlight-slide, #latestCompletedList li, .sidebar-list-panel li",
+        ).animes
         AnimesPage(animes, true)
     } else {
         val response = client.get("$baseUrl/anime?page=${page - 1}")
@@ -83,7 +97,10 @@ class AV1Encodes : Source() {
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage = if (page == 1) {
         val response = client.get(baseUrl)
-        val animes = parseCardList(response.useAsJsoup()).animes
+        val animes = parseCardList(
+            response.useAsJsoup(),
+            selector = "#episodeGrid article, .latest-panel article",
+        ).animes
         AnimesPage(animes, true)
     } else {
         val response = client.get("$baseUrl/anime?page=${page - 1}")
@@ -128,10 +145,11 @@ class AV1Encodes : Source() {
         }
     }
 
-    private fun parseCardList(doc: Document): AnimesPage {
-        var animes = doc.select(
-            "a.anime-link, article.spotlight-slide, article.anime-card, #episodeGrid article, #latestCompletedList li, article[class*='card']",
-        ).mapNotNull { el ->
+    private fun parseCardList(
+        doc: Document,
+        selector: String = "a.anime-link, article.spotlight-slide, article.anime-card, #episodeGrid article, #latestCompletedList li, article[class*='card']",
+    ): AnimesPage {
+        var animes = doc.select(selector).mapNotNull { el ->
             val a = if (el.tagName() == "a" && el.attr("href").contains("/anime/")) {
                 el
             } else {
@@ -180,7 +198,7 @@ class AV1Encodes : Source() {
         val animes = doc.select("li > a[href*='/anime/'], a.anime-index-link").mapNotNull { a ->
             val href = normalizePath(a.attr("href"))
             if (!href.startsWith("/anime/") || href == "/anime/") return@mapNotNull null
-            val titleText = a.text().ifBlank { return@mapNotNull null }
+            val titleText = a.text().trim().ifBlank { return@mapNotNull null }
             SAnime.create().apply {
                 setUrlWithoutDomain(href)
                 title = titleText
@@ -562,6 +580,8 @@ class AV1Encodes : Source() {
 
     companion object {
         private const val TAG = "AV1Encodes"
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private val RES_LABEL_REGEX = Regex("""\[(\d+p)]""")
         private val AUDIO_TAG_REGEX = Regex("""\[(Dual|Sub|Dub|Tri|Multi)]""", RegexOption.IGNORE_CASE)
