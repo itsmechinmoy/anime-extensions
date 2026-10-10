@@ -83,7 +83,8 @@ class AV1Encodes : Source() {
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage = if (page == 1) {
         val response = client.get(baseUrl)
-        parseCardList(response.useAsJsoup())
+        val animes = parseCardList(response.useAsJsoup()).animes
+        AnimesPage(animes, true)
     } else {
         val response = client.get("$baseUrl/anime?page=${page - 1}")
         parseAnimeListPage(response.useAsJsoup())
@@ -347,11 +348,30 @@ class AV1Encodes : Source() {
         val encodedFilename = episodeUrl.substringBefore("?").substringAfterLast("/")
         val filename = Uri.decode(encodedFilename)
 
-        val downloadPageUrl = baseUrl + episodeUrl
-        val pageHtml = try {
-            client.get(downloadPageUrl).bodyString()
-        } catch (e: Exception) {
-            Log.e(TAG, "getVideoList: download page failed — ${e.message}")
+        var downloadPageUrl = baseUrl + episodeUrl
+        var pageHtml = runCatching { client.get(downloadPageUrl).bodyString() }.getOrNull()
+
+        if (pageHtml == null || !pageHtml.contains("anime-video-player")) {
+            val pathParts = episodeUrl.substringBefore("?").trim('/').split("/")
+            if (pathParts.size >= 5 && pathParts[0] == "download") {
+                val slug = pathParts[1]
+                val season = pathParts[2]
+                val res = pathParts[3]
+                val freshEpDoc = runCatching {
+                    client.get("$baseUrl/episodes/$slug/$season/$res").useAsJsoup()
+                }.getOrNull()
+                val freshLink = freshEpDoc?.select("a[href*='/download/']")?.firstOrNull {
+                    it.attr("href").contains(encodedFilename)
+                }?.attr("href")
+                if (!freshLink.isNullOrBlank()) {
+                    downloadPageUrl = baseUrl + freshLink
+                    pageHtml = runCatching { client.get(downloadPageUrl).bodyString() }.getOrNull()
+                }
+            }
+        }
+
+        if (pageHtml.isNullOrBlank()) {
+            Log.e(TAG, "getVideoList: failed to load download page for $encodedFilename")
             return fallbackDirectUrl(episodeUrl, filename)
         }
 
