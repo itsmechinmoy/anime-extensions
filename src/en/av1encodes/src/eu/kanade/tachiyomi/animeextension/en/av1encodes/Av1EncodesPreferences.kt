@@ -18,7 +18,7 @@ internal val PREF_QUALITY_DEFAULT = QUALITY_VALUES.first()
 
 internal const val PREF_LINK_TYPE_KEY = "preferred_link_type"
 internal const val PREF_LINK_TYPE_DEFAULT = "Stream"
-internal val LINK_TYPE_ENTRIES = listOf("DASH", "Stream", "Direct DL", "Torrent")
+internal val LINK_TYPE_ENTRIES = listOf("Dash", "Stream", "Direct DL", "Torrent")
 
 internal const val PREF_SHOW_TORRENT_KEY = "show_torrent"
 internal const val PREF_SHOW_TORRENT_DEFAULT = true
@@ -44,8 +44,8 @@ internal fun buildPreferenceScreen(screen: PreferenceScreen) {
 
     screen.addListPreference(
         key = PREF_LINK_TYPE_KEY,
-        title = "Preferred Link Type",
-        summary = "%s — this link type will appear first in the video list.",
+        title = "Preferred Server / Hoster",
+        summary = "%s — this hoster will appear first in the server list.",
         entries = LINK_TYPE_ENTRIES,
         entryValues = LINK_TYPE_ENTRIES,
         default = PREF_LINK_TYPE_DEFAULT,
