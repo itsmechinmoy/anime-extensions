@@ -180,7 +180,7 @@ class AV1Encodes : Source() {
         val animes = doc.select("li > a[href*='/anime/'], a.anime-index-link").mapNotNull { a ->
             val href = normalizePath(a.attr("href"))
             if (!href.startsWith("/anime/") || href == "/anime/") return@mapNotNull null
-            val titleText = a.text().trim().ifBlank { return@mapNotNull null }
+            val titleText = a.text().ifBlank { return@mapNotNull null }
             SAnime.create().apply {
                 setUrlWithoutDomain(href)
                 title = titleText
