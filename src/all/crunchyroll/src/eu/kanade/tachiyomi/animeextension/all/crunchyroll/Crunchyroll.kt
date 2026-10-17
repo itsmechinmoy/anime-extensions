@@ -451,9 +451,7 @@ class Crunchyroll :
 
     // ============================ Video Links =============================
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        return hoster.videoList ?: emptyList()
-    }
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList ?: emptyList()
 
     override fun videoListRequest(hoster: Hoster) = throw UnsupportedOperationException()
     override fun videoListParse(response: Response, hoster: Hoster) = throw UnsupportedOperationException()
