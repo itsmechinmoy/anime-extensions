@@ -18,10 +18,10 @@ internal val PREF_QUALITY_DEFAULT = QUALITY_VALUES.first()
 
 internal const val PREF_LINK_TYPE_KEY = "preferred_link_type"
 internal const val PREF_LINK_TYPE_DEFAULT = "Stream"
-internal val LINK_TYPE_ENTRIES = listOf("Dash", "Stream", "Direct DL", "Torrent")
+internal val LINK_TYPE_ENTRIES = listOf("Stream", "Direct DL", "Dash", "Torrent")
 
 internal const val PREF_SHOW_TORRENT_KEY = "show_torrent"
-internal const val PREF_SHOW_TORRENT_DEFAULT = true
+internal const val PREF_SHOW_TORRENT_DEFAULT = false
 
 internal fun buildPreferenceScreen(screen: PreferenceScreen) {
     screen.addListPreference(
@@ -54,7 +54,7 @@ internal fun buildPreferenceScreen(screen: PreferenceScreen) {
     screen.addSwitchPreference(
         key = PREF_SHOW_TORRENT_KEY,
         title = "Show Torrent Link",
-        summary = "Include the torrent link as a video option.",
+        summary = "Include the torrent link as a server option (requires external torrent client, cannot play in built-in player).",
         default = PREF_SHOW_TORRENT_DEFAULT,
     )
 }
