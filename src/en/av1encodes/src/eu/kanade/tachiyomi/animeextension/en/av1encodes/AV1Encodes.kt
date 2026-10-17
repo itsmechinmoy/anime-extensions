@@ -352,9 +352,9 @@ class AV1Encodes : Source() {
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val preferredLinkType = preferences.getString(PREF_LINK_TYPE_KEY, PREF_LINK_TYPE_DEFAULT)!!
         val hosters = buildList {
-            add(Hoster(hosterName = "Dash", internalData = episode.url))
             add(Hoster(hosterName = "Stream", internalData = episode.url))
             add(Hoster(hosterName = "Direct DL", internalData = episode.url))
+            add(Hoster(hosterName = "Dash", internalData = episode.url))
             if (showTorrent) {
                 add(Hoster(hosterName = "Torrent", internalData = episode.url))
             }
@@ -447,7 +447,7 @@ class AV1Encodes : Source() {
 
         val doc = pageHtml?.let { Jsoup.parse(it) }
         val iframeSrc = doc?.selectFirst("iframe#anime-video-player, iframe[src*='/r/']")?.attr("src")
-        val watchUrl = iframeSrc?.let { resolveRedirect(it) }
+        val watchUrl = iframeSrc?.let { resolveRedirect(it) ?: (baseUrl + it) }
 
         val ddlToken = pageHtml?.let { TOKEN_REGEX.find(it)?.groupValues?.get(1) }
         val ddl = if (ddlToken != null) {
@@ -465,36 +465,40 @@ class AV1Encodes : Source() {
             null
         }
 
-        val ddlWatch = ddl?.watchLink?.let { resolveRedirect(it) }
+        val ddlWatch = ddl?.watchLink?.let { resolveRedirect(it) ?: (baseUrl + it) }
         val effectiveWatch = watchUrl ?: ddlWatch
-        val streamUrl = ddl?.streamLink?.let { resolveRedirect(it) } ?: effectiveWatch
-        val directDlUrl = ddl?.downloadLink?.let { resolveRedirect(it) } ?: downloadPageUrl
-        val torrentUrl = ddl?.torrentLink?.let { resolveRedirect(it) }
+        val streamUrl = ddl?.streamLink?.let { resolveRedirect(it) ?: (baseUrl + it) }
+        val directDlUrl = ddl?.downloadLink?.let { resolveRedirect(it) ?: (baseUrl + it) } ?: downloadPageUrl
+        val torrentUrl = ddl?.torrentLink?.let { resolveRedirect(it) ?: (baseUrl + it) }
+
+        val videoHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/")
+            .build()
 
         return when {
+            hosterName.equals("Stream", ignoreCase = true) -> {
+                val url = streamUrl ?: directDlUrl
+                Video(videoUrl = url, videoTitle = videoTitle, headers = videoHeaders)
+            }
+            hosterName.equals("Direct DL", ignoreCase = true) -> {
+                Video(videoUrl = directDlUrl, videoTitle = videoTitle, headers = videoHeaders)
+            }
             hosterName.equals("Dash", ignoreCase = true) -> {
                 if (effectiveWatch != null && effectiveWatch.contains("/watch/")) {
                     val mpdUrl = effectiveWatch.replace("/watch/", "/dash/") + "/manifest.mpd"
-                    Video(videoUrl = mpdUrl, videoTitle = videoTitle)
+                    Video(videoUrl = mpdUrl, videoTitle = videoTitle, headers = videoHeaders)
                 } else {
-                    Video(videoUrl = directDlUrl, videoTitle = videoTitle)
+                    Video(videoUrl = streamUrl ?: directDlUrl, videoTitle = videoTitle, headers = videoHeaders)
                 }
-            }
-            hosterName.equals("Stream", ignoreCase = true) -> {
-                val url = effectiveWatch ?: streamUrl ?: directDlUrl
-                Video(videoUrl = url, videoTitle = videoTitle)
-            }
-            hosterName.equals("Direct DL", ignoreCase = true) -> {
-                Video(videoUrl = directDlUrl, videoTitle = videoTitle)
             }
             hosterName.equals("Torrent", ignoreCase = true) -> {
                 if (!torrentUrl.isNullOrBlank()) {
-                    Video(videoUrl = torrentUrl, videoTitle = videoTitle)
+                    Video(videoUrl = torrentUrl, videoTitle = "$videoTitle (Torrent)", headers = videoHeaders)
                 } else {
                     null
                 }
             }
-            else -> Video(videoUrl = directDlUrl, videoTitle = videoTitle)
+            else -> Video(videoUrl = streamUrl ?: directDlUrl, videoTitle = videoTitle, headers = videoHeaders)
         }
     }
 
@@ -513,7 +517,7 @@ class AV1Encodes : Source() {
         val resLabel = RES_LABEL_REGEX.find(filename)?.groupValues?.get(1) ?: prefQuality
         val audioTag = AUDIO_TAG_REGEX.find(filename)?.groupValues?.get(1) ?: ""
         val label = "AV1 · $resLabel${if (audioTag.isNotBlank()) " [$audioTag]" else ""}"
-        return listOf(Video(videoUrl = fullUrl, videoTitle = label))
+        return listOf(Video(videoUrl = fullUrl, videoTitle = label, headers = headers))
     }
 
     // =========================== Extraction Helpers ========================
