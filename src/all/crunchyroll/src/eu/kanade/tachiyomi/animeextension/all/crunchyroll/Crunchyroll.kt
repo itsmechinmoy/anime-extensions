@@ -31,7 +31,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
+import okhttp3.Call
 import okhttp3.CookieJar
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -45,6 +48,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlin.math.ceil
 
 /**
@@ -388,7 +392,12 @@ class Crunchyroll :
         val url = "$baseUrl/content/v2/cms/series/$seriesId/seasons?locale=$contentLocale"
         return client.newCall(GET(url, headers)).execute()
             .parseAs<SeasonsResponseDto>().data
-            .distinctBy { it.seasonNumber to it.seasonDisplayNumber }
+            // A season can be listed once per audio version. Keep the original-audio one
+            // (its stable id is its own id) so the id stored in the season URL never
+            // points at a dub; a dub is only kept when no sibling qualifies.
+            .groupBy { it.seasonNumber to it.seasonDisplayNumber }
+            .values
+            .map { siblings -> siblings.firstOrNull { it.stableId == it.id } ?: siblings.first() }
     }
 
     private fun fetchEpisodes(seasonId: String): List<EpisodeDto> {
@@ -401,10 +410,14 @@ class Crunchyroll :
     // so every parse gets its own instance.
     private fun parseDate(date: String?): Long = newDateFormat().tryParse(date)
 
-    // Runs the blocking lookups in parallel; the first failure cancels the rest and
-    // is rethrown so the app can offer a retry.
+    // Shared by every parallel lookup this source makes, so a cold listing page cannot
+    // fan out into dozens of simultaneous authenticated requests.
+    private val lookupPermits = Semaphore(MAX_PARALLEL_LOOKUPS)
+
+    // Runs the blocking lookups in parallel, at most MAX_PARALLEL_LOOKUPS at a time; the
+    // first failure cancels the rest and is rethrown so the app can offer a retry.
     private suspend fun <A, B> List<A>.fetchAll(transform: suspend (A) -> B): List<B> = coroutineScope {
-        this@fetchAll.map { async(Dispatchers.IO) { transform(it) } }.awaitAll()
+        this@fetchAll.map { async(Dispatchers.IO) { lookupPermits.withPermit { transform(it) } } }.awaitAll()
     }
 
     // ============================== Hosters ===============================
@@ -559,9 +572,11 @@ class Crunchyroll :
 
     // ============================== Streams ===============================
 
-    // Everything below that touches stream state runs under streamLock, so
-    // overlapping getHosterList calls, the keep-alive ping and the release request
-    // can never interleave: a ping cannot land after the release that follows it.
+    // streamLock guards the bookkeeping below and is never held across a request, so a
+    // slow ping or release cannot stall getHosterList. A ping still cannot land after
+    // the release that follows it: releasing first retires the stream (it stops being
+    // lastStream, so no new ping can start for it) and cancels a ping already on the
+    // wire, and only then sends the release.
     private val streamLock = Any()
 
     private var lastStream: Pair<String, String>? = null
@@ -573,20 +588,45 @@ class Crunchyroll :
 
     private var keepAliveJob: Job? = null
 
-    private fun registerStream(id: String, streamToken: String, session: SessionDto?) = synchronized(streamLock) {
-        // A stream registered by an overlapping call is released, not forgotten.
-        lastStream?.let { queueRelease(it) }
-        lastStream = id to streamToken
-        startKeepAlive(id, streamToken, session)
-        flushReleases()
+    // The keep-alive request on the wire for lastStream, kept so a release can abort it.
+    private var pingCall: Call? = null
+
+    // Pings are small and repeated, so a stuck one is abandoned well before the shared
+    // client's timeouts would.
+    private val pingClient by lazy {
+        client.newBuilder()
+            .callTimeout(PING_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
     }
 
-    private fun releasePreviousStream() = synchronized(streamLock) {
+    private fun registerStream(id: String, streamToken: String, session: SessionDto?) {
+        val unreleased = synchronized(streamLock) {
+            // A stream registered by an overlapping call is released, not forgotten.
+            retireStream()
+            lastStream = id to streamToken
+            startKeepAlive(id, streamToken, session)
+            pendingReleases.toList()
+        }
+        flushReleases(unreleased)
+    }
+
+    private fun releasePreviousStream() {
+        val unreleased = synchronized(streamLock) {
+            retireStream()
+            pendingReleases.toList()
+        }
+        flushReleases(unreleased)
+    }
+
+    // Caller holds streamLock. Stops the keep-alive for lastStream, aborts a ping in
+    // flight and queues the stream for release. Sends nothing itself.
+    private fun retireStream() {
         keepAliveJob?.cancel()
         keepAliveJob = null
+        pingCall?.cancel()
+        pingCall = null
         lastStream?.let { queueRelease(it) }
         lastStream = null
-        flushReleases()
     }
 
     private fun queueRelease(stream: Pair<String, String>) {
@@ -594,9 +634,12 @@ class Crunchyroll :
         while (pendingReleases.size > MAX_PENDING_RELEASES) pendingReleases.removeAt(0)
     }
 
-    // Caller holds streamLock. Whatever is not confirmed stays queued for next time.
-    private fun flushReleases() {
-        pendingReleases.removeAll { sendInactive(it) }
+    // Runs outside streamLock. Whatever is not confirmed stays queued for next time.
+    private fun flushReleases(streams: List<Pair<String, String>>) {
+        val confirmed = streams.filter { sendInactive(it) }
+        if (confirmed.isNotEmpty()) {
+            synchronized(streamLock) { pendingReleases.removeAll(confirmed) }
+        }
     }
 
     // True once the slot is known to be free: success, or the token already being gone.
@@ -622,7 +665,6 @@ class Crunchyroll :
     // A stream token expires ~renewSeconds after it is issued unless pinged, which
     // drops playback a few minutes in. Caller holds streamLock.
     private fun startKeepAlive(id: String, streamToken: String, session: SessionDto?) {
-        keepAliveJob?.cancel()
         val renew = (session?.renewSeconds ?: 270).coerceAtLeast(60)
         val interval = (renew - 30).coerceAtLeast(30) * 1000L
         val deadline = System.currentTimeMillis() + SESSION_MAX_SECONDS * 1000L
@@ -630,22 +672,7 @@ class Crunchyroll :
             var failures = 0
             while (isActive && System.currentTimeMillis() < deadline) {
                 delay(interval)
-                val code = synchronized(streamLock) {
-                    // Checked under the lock: once the stream is replaced or released,
-                    // no further ping can be sent for it.
-                    if (lastStream?.second != streamToken) return@launch
-                    runCatching {
-                        val request = Request.Builder()
-                            .url("$PLAY_HOST/v1/token/$id/$streamToken/active")
-                            .headers(headers)
-                            .patch(ByteArray(0).toRequestBody())
-                            .build()
-                        client.newCall(request).execute().use { it.code }
-                    }.getOrElse {
-                        Log.w(LOG_TAG, "keep-alive $id failed: ${it.message}")
-                        -1
-                    }
-                }
+                val code = ping(id, streamToken) ?: return@launch
                 // The token is gone; further pings are pointless.
                 if (code == 404 || code == 410) return@launch
                 if (code in 200..299) {
@@ -658,6 +685,36 @@ class Crunchyroll :
             }
         }
     }
+
+    // Caller must not hold streamLock. Returns the ping's HTTP status (-1 if it could not
+    // be completed), or null once the stream has been replaced or released.
+    private fun ping(id: String, streamToken: String): Int? {
+        val call = synchronized(streamLock) {
+            // Checked under the lock: once the stream is replaced or released, no further
+            // ping can start for it.
+            if (lastStream?.second != streamToken) return null
+            val request = Request.Builder()
+                .url("$PLAY_HOST/v1/token/$id/$streamToken/active")
+                .headers(headers)
+                .patch(ByteArray(0).toRequestBody())
+                .build()
+            pingClient.newCall(request).also { pingCall = it }
+        }
+
+        // The request itself runs outside the lock.
+        return try {
+            call.execute().use { it.code }
+        } catch (e: Exception) {
+            // A release cancels the ping in flight; that is expected, not a failure.
+            if (!isCurrentStream(streamToken)) return null
+            Log.w(LOG_TAG, "keep-alive $id failed: ${e.message}")
+            -1
+        } finally {
+            synchronized(streamLock) { if (pingCall === call) pingCall = null }
+        }
+    }
+
+    private fun isCurrentStream(streamToken: String) = synchronized(streamLock) { lastStream?.second == streamToken }
 
     // ============================= Utilities ==============================
 
@@ -753,6 +810,9 @@ class Crunchyroll :
 
         private const val PAGE_SIZE = 36
 
+        /** Simultaneous season/episode lookups across the whole source. */
+        private const val MAX_PARALLEL_LOOKUPS = 4
+
         private const val PLAY_HOST = "https://cr-play-service.prd.crunchyrollsvc.com"
 
         // The service allows six hours, but with no playback-stopped hook a shorter
@@ -761,6 +821,9 @@ class Crunchyroll :
 
         /** Consecutive renewal failures before the session is presumed dead. */
         private const val MAX_KEEPALIVE_FAILURES = 2
+
+        /** A keep-alive ping slower than this is abandoned and counted as a failure. */
+        private const val PING_TIMEOUT_SECONDS = 15L
 
         /** Unconfirmed release requests kept for retry. */
         private const val MAX_PENDING_RELEASES = 5
