@@ -106,7 +106,7 @@ object Filters {
             if (sorts.isNotEmpty()) editor.putString(PREF_SORTS, encodePairs(sorts))
             editor.apply()
         } catch (_: Exception) {
-            // Keep using existing cached/defaults
+            // Keep using existing cached
         }
     }
 
@@ -124,18 +124,14 @@ object Filters {
         fun toUriPart() = vals[state].second
     }
 
-    class SortFilter(vals: Array<Pair<String, String>> = DEFAULT_SORTS.toTypedArray()) : UriPartFilter("Sort by", vals)
-
-    class FormatFilter(vals: Array<Pair<String, String>> = (listOf(Pair("Any", "")) + DEFAULT_FORMATS).toTypedArray()) : UriPartFilter("Format", vals)
-
-    class StatusFilter(vals: Array<Pair<String, String>> = (listOf(Pair("Any", "")) + DEFAULT_STATUSES).toTypedArray()) : UriPartFilter("Status", vals)
-
-    class SeasonFilter(vals: Array<Pair<String, String>> = (listOf(Pair("Any", "")) + DEFAULT_SEASONS).toTypedArray()) : UriPartFilter("Season", vals)
-
+    class SortFilter(vals: Array<Pair<String, String>>) : UriPartFilter("Sort by", vals)
+    class FormatFilter(vals: Array<Pair<String, String>>) : UriPartFilter("Format", vals)
+    class StatusFilter(vals: Array<Pair<String, String>>) : UriPartFilter("Status", vals)
+    class SeasonFilter(vals: Array<Pair<String, String>>) : UriPartFilter("Season", vals)
     class YearFilter : AnimeFilter.Text("Year")
 
     class GenreCheckBox(name: String) : AnimeFilter.CheckBox(name, false)
-    class GenreFilter(genres: List<String> = DEFAULT_GENRES) : AnimeFilter.Group<GenreCheckBox>("Genres", genres.map { GenreCheckBox(it) }) {
+    class GenreFilter(genres: List<String>) : AnimeFilter.Group<GenreCheckBox>("Genres", genres.map { GenreCheckBox(it) }) {
         fun getIncluded(): List<String> = state.filter { it.state }.map { it.name }
     }
 
@@ -145,91 +141,45 @@ object Filters {
     }
 
     fun build(preferences: SharedPreferences? = null): AnimeFilterList {
-        val cachedSorts = decodePairs(preferences?.getString(PREF_SORTS, null)).takeIf { it.isNotEmpty() }
-            ?: DEFAULT_SORTS
-        val cachedFormats = listOf(Pair("Any", "")) + (decodePairs(preferences?.getString(PREF_FORMATS, null)).takeIf { it.isNotEmpty() } ?: DEFAULT_FORMATS)
-        val cachedStatuses = listOf(Pair("Any", "")) + (decodePairs(preferences?.getString(PREF_STATUSES, null)).takeIf { it.isNotEmpty() } ?: DEFAULT_STATUSES)
-        val cachedSeasons = listOf(Pair("Any", "")) + (decodePairs(preferences?.getString(PREF_SEASONS, null)).takeIf { it.isNotEmpty() } ?: DEFAULT_SEASONS)
+        val cachedSorts = decodePairs(preferences?.getString(PREF_SORTS, null))
+        val cachedFormats = decodePairs(preferences?.getString(PREF_FORMATS, null))
+        val cachedStatuses = decodePairs(preferences?.getString(PREF_STATUSES, null))
+        val cachedSeasons = decodePairs(preferences?.getString(PREF_SEASONS, null))
 
         val cachedGenres = preferences?.getString(PREF_GENRES, null)
-            ?.split("\n")?.filter { it.isNotBlank() }
-            ?.takeIf { it.isNotEmpty() } ?: DEFAULT_GENRES
+            ?.split("\n")?.filter { it.isNotBlank() }.orEmpty()
 
         val cachedTags = preferences?.getString(PREF_TAGS, null)
-            ?.split("\n")?.filter { it.isNotBlank() }
-            .orEmpty()
+            ?.split("\n")?.filter { it.isNotBlank() }.orEmpty()
 
         val filters = mutableListOf<AnimeFilter<*>>(
             AnimeFilter.Header("Filters can be combined with a text search"),
-            SortFilter(cachedSorts.toTypedArray()),
-            FormatFilter(cachedFormats.toTypedArray()),
-            StatusFilter(cachedStatuses.toTypedArray()),
-            SeasonFilter(cachedSeasons.toTypedArray()),
-            YearFilter(),
-            GenreFilter(cachedGenres),
         )
 
+        if (cachedSorts.isNotEmpty()) {
+            filters.add(SortFilter(cachedSorts.toTypedArray()))
+        }
+        if (cachedFormats.isNotEmpty()) {
+            filters.add(FormatFilter((listOf(Pair("Any", "")) + cachedFormats).toTypedArray()))
+        }
+        if (cachedStatuses.isNotEmpty()) {
+            filters.add(StatusFilter((listOf(Pair("Any", "")) + cachedStatuses).toTypedArray()))
+        }
+        if (cachedSeasons.isNotEmpty()) {
+            filters.add(SeasonFilter((listOf(Pair("Any", "")) + cachedSeasons).toTypedArray()))
+        }
+        filters.add(YearFilter())
+        if (cachedGenres.isNotEmpty()) {
+            filters.add(GenreFilter(cachedGenres))
+        }
         if (cachedTags.isNotEmpty()) {
             filters.add(TagFilter(cachedTags))
-        } else {
-            filters.add(AnimeFilter.Header("Tags are loading... Reopen filters once loaded."))
+        }
+
+        if (cachedSorts.isEmpty() && cachedGenres.isEmpty()) {
+            filters.add(AnimeFilter.Header("Filters are loading... Reopen filters once loaded."))
         }
 
         return AnimeFilterList(filters)
     }
-
-    private val DEFAULT_SORTS = listOf(
-        Pair("Popularity", "popularity"),
-        Pair("Score", "score"),
-        Pair("Trending", "trending"),
-        Pair("Favourites", "favourites"),
-        Pair("Newest", "year"),
-        Pair("Recently updated", "updated"),
-        Pair("Title", "title"),
-    )
-
-    private val DEFAULT_FORMATS = listOf(
-        Pair("TV", "TV"),
-        Pair("TV Short", "TV_SHORT"),
-        Pair("Movie", "MOVIE"),
-        Pair("Special", "SPECIAL"),
-        Pair("OVA", "OVA"),
-        Pair("ONA", "ONA"),
-        Pair("Music", "MUSIC"),
-    )
-
-    private val DEFAULT_STATUSES = listOf(
-        Pair("Releasing", "RELEASING"),
-        Pair("Finished", "FINISHED"),
-        Pair("Not yet released", "NOT_YET_RELEASED"),
-        Pair("Cancelled", "CANCELLED"),
-    )
-
-    private val DEFAULT_SEASONS = listOf(
-        Pair("Winter", "WINTER"),
-        Pair("Spring", "SPRING"),
-        Pair("Summer", "SUMMER"),
-        Pair("Fall", "FALL"),
-    )
-
-    private val DEFAULT_GENRES = listOf(
-        "Action",
-        "Adventure",
-        "Comedy",
-        "Drama",
-        "Ecchi",
-        "Fantasy",
-        "Horror",
-        "Mahou Shoujo",
-        "Mecha",
-        "Music",
-        "Mystery",
-        "Psychological",
-        "Romance",
-        "Sci-Fi",
-        "Slice of Life",
-        "Sports",
-        "Supernatural",
-        "Thriller",
-    )
 }
