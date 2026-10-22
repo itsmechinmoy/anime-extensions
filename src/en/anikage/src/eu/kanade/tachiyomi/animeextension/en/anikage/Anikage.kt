@@ -65,7 +65,9 @@ class Anikage : Source() {
 
     init {
         CoroutineScope(Dispatchers.IO).launch {
-            Filters.fetchFilters(client, baseUrl, preferences)
+            runCatching {
+                Filters.fetchFilters(client, baseUrl, preferences)
+            }
         }
     }
 
