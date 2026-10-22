@@ -2,7 +2,7 @@ ext {
     extName = 'WIT ANIME'
     extClass = '.WitAnime'
     libVersion = 16
-    extVersionCode = 68
+    extVersionCode = 66
     isNsfw = false
 }
 
