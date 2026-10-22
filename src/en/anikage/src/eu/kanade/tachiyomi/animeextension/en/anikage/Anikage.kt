@@ -22,6 +22,9 @@ import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.util.concurrent.TimeUnit
@@ -60,6 +63,12 @@ class Anikage : Source() {
     private val preferredQuality: String
         by preferences.delegate(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)
 
+    init {
+        CoroutineScope(Dispatchers.IO).launch {
+            Filters.fetchFilters(client, baseUrl, preferences)
+        }
+    }
+
     override val migration: SharedPreferences.() -> Unit = {
         val oldType = getString("sub_or_dub", null)
         if (oldType != null && !contains(PREF_TYPE_KEY)) {
@@ -93,6 +102,7 @@ class Anikage : Source() {
         val season = filters.filterIsInstance<Filters.SeasonFilter>().firstOrNull()?.toUriPart().orEmpty()
         val year = filters.filterIsInstance<Filters.YearFilter>().firstOrNull()?.state?.trim().orEmpty()
         val genres = filters.filterIsInstance<Filters.GenreFilter>().firstOrNull()?.getIncluded().orEmpty()
+        val tags = filters.filterIsInstance<Filters.TagFilter>().firstOrNull()?.getIncluded().orEmpty()
 
         return browse(
             page = page,
@@ -103,10 +113,11 @@ class Anikage : Source() {
             season = season,
             year = year,
             genres = genres,
+            tags = tags,
         )
     }
 
-    override fun getFilterList(): AnimeFilterList = Filters.build()
+    override fun getFilterList(): AnimeFilterList = Filters.build(preferences)
 
     private suspend fun browse(
         page: Int,
@@ -117,6 +128,7 @@ class Anikage : Source() {
         season: String = "",
         year: String = "",
         genres: List<String> = emptyList(),
+        tags: List<String> = emptyList(),
     ): AnimesPage {
         val showAdult = preferences.getBoolean(PREF_ADULT_KEY, false)
         val url = "$apiUrl/anime/browse".toHttpUrl().newBuilder().apply {
@@ -133,6 +145,7 @@ class Anikage : Source() {
                 addQueryParameter("yearMax", year)
             }
             if (genres.isNotEmpty()) addQueryParameter("genres", genres.joinToString(","))
+            if (tags.isNotEmpty()) addQueryParameter("tags", tags.joinToString(","))
         }.build()
 
         val response = client.get(url, headers)
