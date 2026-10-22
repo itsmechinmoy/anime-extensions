@@ -31,6 +31,7 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -65,7 +66,10 @@ class WitAnime :
     override val client: OkHttpClient by lazy {
         network.client.newBuilder()
             .addInterceptor(CloudflareInterceptor(network.client))
-            .rateLimit(permits = 1, period = 2.seconds)
+            .rateLimit(permits = 1, period = 2.seconds) { url ->
+                val baseHost = runCatching { baseUrl.toHttpUrl().host }.getOrNull()
+                url.host == baseHost
+            }
             .build()
     }
 
@@ -87,10 +91,23 @@ class WitAnime :
     private val universalExtractor by lazy { UniversalExtractor(client) }
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val preferences by getPreferencesLazy()
+    private val preferences by getPreferencesLazy {
+        val oldQuality = getString("preferred_quality", null)
+        if (oldQuality != null && getString(PREF_QUALITY_KEY, null) == null) {
+            val mapped = when {
+                oldQuality.contains("1080") -> "FHD"
+                oldQuality.contains("720") -> "HD"
+                oldQuality.contains("480") || oldQuality.contains("360") -> "SD"
+                else -> "FHD"
+            }
+            edit().putString(PREF_QUALITY_KEY, mapped).apply()
+        }
+    }
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             runCatching {
                 Filters.fetchFilters(client, baseUrl, preferences)
             }
@@ -134,38 +151,39 @@ class WitAnime :
             .addHeader("Referer", "$baseUrl/")
             .build()
 
-        val response = runCatching { client.newCall(req).execute() }.getOrNull() ?: return AnimesPage(emptyList(), false)
-        val jsonObject = runCatching { response.parseAs<JsonObject>() }.getOrNull()
-
-        if (jsonObject != null) {
-            val html = jsonObject["html"]?.jsonPrimitive?.contentOrNull ?: ""
-            val hasOlder = jsonObject["hasOlder"]?.jsonPrimitive?.booleanOrNull ?: false
-            val doc = org.jsoup.Jsoup.parseBodyFragment(html, baseUrl)
-
-            val animeList = doc.select("a[href*='/watch/']")
-                .distinctBy { extractSlug(it.attr("href")) }
-                .mapNotNull { el ->
-                    val href = el.attr("href")
-                    val slug = extractSlug(href)
-                    val isMovie = href.contains("/watch/movie/")
-                    val animePath = if (isMovie) "/movie/$slug" else "/anime/$slug"
-                    val title = el.selectFirst("h3")?.text()?.ifBlank { null }
-                        ?: el.selectFirst("img")?.attr("alt")?.ifBlank { null }
-                        ?: return@mapNotNull null
-                    val thumb = el.selectFirst("img")?.let { img ->
-                        img.attr("abs:src").ifBlank { img.attr("src") }
-                    }
-                    SAnime.create().apply {
-                        this.title = title
-                        thumbnail_url = thumb
-                        this.url = animePath
-                        fetch_type = FetchType.Episodes
-                    }
-                }
-            return AnimesPage(animeList, hasOlder)
+        val response = client.newCall(req).execute()
+        if (!response.isSuccessful) {
+            val code = response.code
+            response.close()
+            throw Exception("فشل تحميل آخر الحلقات (HTTP $code)")
         }
 
-        return AnimesPage(emptyList(), false)
+        val jsonObject = response.parseAs<JsonObject>()
+        val html = jsonObject["html"]?.jsonPrimitive?.contentOrNull ?: ""
+        val hasOlder = jsonObject["hasOlder"]?.jsonPrimitive?.booleanOrNull ?: false
+        val doc = org.jsoup.Jsoup.parseBodyFragment(html, baseUrl)
+
+        val animeList = doc.select("a[href*='/watch/']")
+            .distinctBy { extractSlug(it.attr("href")) }
+            .mapNotNull { el ->
+                val href = el.attr("href")
+                val slug = extractSlug(href)
+                val isMovie = href.contains("/watch/movie/")
+                val animePath = if (isMovie) "/movie/$slug" else "/anime/$slug"
+                val title = el.selectFirst("h3")?.text()?.ifBlank { null }
+                    ?: el.selectFirst("img")?.attr("alt")?.ifBlank { null }
+                    ?: return@mapNotNull null
+                val thumb = el.selectFirst("img")?.let { img ->
+                    img.attr("abs:src").ifBlank { img.attr("src") }
+                }
+                SAnime.create().apply {
+                    this.title = title
+                    thumbnail_url = thumb
+                    this.url = animePath
+                    fetch_type = FetchType.Episodes
+                }
+            }
+        return AnimesPage(animeList, hasOlder)
     }
 
     // =============================== Search ===============================
@@ -235,7 +253,13 @@ class WitAnime :
         return AnimesPage(animeList, hasNext)
     }
 
-    override fun getFilterList(): AnimeFilterList = Filters.build(preferences)
+    override fun getFilterList(): AnimeFilterList = Filters.build(preferences, baseUrl) {
+        scope.launch {
+            runCatching {
+                Filters.fetchFilters(client, baseUrl, preferences)
+            }
+        }
+    }
 
     // =========================== Anime Details ============================
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
@@ -253,6 +277,7 @@ class WitAnime :
             .filter { it.isNotBlank() }
 
         return SAnime.create().apply {
+            this.url = anime.url
             this.title = title
             thumbnail_url = thumb
             genre = genres.joinToString(", ")
@@ -382,7 +407,8 @@ class WitAnime :
                         .let { runCatching { String(Base64.decode(it, Base64.DEFAULT)) }.getOrNull() ?: it }
                 Hoster(
                     hosterName = el.text().trim(),
-                    hosterUrl = encoded,
+                    hosterUrl = encoded ?: "",
+                    internalData = "",
                 )
             }
         }
@@ -390,13 +416,20 @@ class WitAnime :
         // 2. Modern watchPlayer JSON manifest
         val csrfToken = doc.selectFirst("meta[name=csrf-token]")?.attr("content") ?: ""
         val htmlContent = doc.html()
+        val baseHttpUrl = cleanBaseUrl.toHttpUrl()
         val rawSourcesUrl = SOURCES_REGEX.find(htmlContent)?.let { match ->
             (1..4).firstNotNullOfOrNull { idx -> match.groups[idx]?.value }
         }?.replace("\\/", "/")?.trim()
 
         val sourcesPath = when {
             !rawSourcesUrl.isNullOrBlank() -> {
-                if (rawSourcesUrl.startsWith("http")) rawSourcesUrl else "$cleanBaseUrl/${rawSourcesUrl.trimStart('/')}"
+                val candidate = if (rawSourcesUrl.startsWith("http")) rawSourcesUrl else "$cleanBaseUrl/${rawSourcesUrl.trimStart('/')}"
+                val parsed = runCatching { candidate.toHttpUrl() }.getOrNull()
+                if (parsed != null && parsed.host == baseHttpUrl.host) {
+                    candidate
+                } else {
+                    "$cleanBaseUrl/${cleanEpUrl.trim('/')}/sources"
+                }
             }
 
             else -> "$cleanBaseUrl/${cleanEpUrl.trim('/')}/sources"
@@ -501,7 +534,8 @@ class WitAnime :
         return hosterMap.map { (serverName, items) ->
             Hoster(
                 hosterName = serverName,
-                hosterUrl = items.toJsonString(),
+                hosterUrl = watchUrl,
+                internalData = items.toJsonString(),
             )
         }
     }
@@ -512,16 +546,18 @@ class WitAnime :
     }
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        if (!hoster.hosterUrl.startsWith("[")) {
+        if (hoster.internalData.isBlank()) {
             return extractVideosFromUrl(hoster.hosterUrl, hoster.hosterName).sortVideos()
         }
 
-        val items = runCatching { hoster.hosterUrl.parseAs<List<ServerItem>>() }.getOrNull()
+        val items = runCatching { hoster.internalData.parseAs<List<ServerItem>>() }.getOrNull()
             ?: return emptyList()
 
         val cleanBaseUrl = baseUrl.trimEnd('/')
 
         return items.parallelCatchingFlatMap { item ->
+            if (!TOKEN_REGEX.matches(item.token)) return@parallelCatchingFlatMap emptyList()
+
             val endpoint = if (item.isDownload) "/watch/download-source/" else "/watch/stream-source/"
             val gateEndpoint = if (item.isDownload) "/watch/download-gate/" else "/watch/stream-gate/"
 
@@ -572,8 +608,11 @@ class WitAnime :
             val gateResp = runCatching { gateClient.newCall(gateBuilder.build()).execute() }.getOrNull()
                 ?: return@parallelCatchingFlatMap emptyList()
 
-            val finalUrl = gateResp.request.url.toString()
-            val gateHtml = if (finalUrl.contains("/watch/")) gateResp.body?.string().orEmpty() else ""
+            val (finalUrl, gateHtml) = gateResp.use { resp ->
+                val fUrl = resp.request.url.toString()
+                val html = if (fUrl.contains("/watch/")) resp.body?.string().orEmpty() else ""
+                fUrl to html
+            }
 
             val resolvedUrl = if (!finalUrl.contains("/watch/")) {
                 finalUrl
@@ -658,7 +697,14 @@ class WitAnime :
     private fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
         return sortedWith(
-            compareBy<Video> { it.videoTitle.contains(quality) }.thenBy { it.videoTitle },
+            compareBy<Video> {
+                when (quality) {
+                    "FHD" -> it.videoTitle.contains("FHD", ignoreCase = true) || it.videoTitle.contains("1080")
+                    "HD" -> (it.videoTitle.contains("HD", ignoreCase = true) && !it.videoTitle.contains("FHD", ignoreCase = true)) || it.videoTitle.contains("720")
+                    "SD" -> it.videoTitle.contains("SD", ignoreCase = true) || it.videoTitle.contains("480") || it.videoTitle.contains("360")
+                    else -> it.videoTitle.contains(quality, ignoreCase = true)
+                }
+            }.thenBy { it.videoTitle },
         ).reversed()
     }
 
@@ -730,6 +776,7 @@ class WitAnime :
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "FHD"
 
+        private val TOKEN_REGEX by lazy { Regex("^[a-zA-Z0-9_\\-]+$") }
         private val SOURCES_REGEX by lazy {
             Regex("""sourcesUrl\s*:\s*(?:'([^']+)'|"([^"]+)"|&quot;([^&]+)&quot;|&#0*39;([^&]+)&#0*39;)""")
         }
