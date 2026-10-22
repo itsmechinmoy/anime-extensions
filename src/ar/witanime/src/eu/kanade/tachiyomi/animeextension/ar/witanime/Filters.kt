@@ -31,7 +31,8 @@ object Filters {
         val lastFetchKey = hostKey(PREF_LAST_FETCH, baseUrl)
         val lastFetch = preferences.getLong(lastFetchKey, 0L)
         val genresKey = hostKey(PREF_GENRES, baseUrl)
-        if (System.currentTimeMillis() - lastFetch < TTL && preferences.getString(genresKey, null) != null) {
+        val cachedGenres = preferences.getString(genresKey, null)
+        if (System.currentTimeMillis() - lastFetch < TTL && !cachedGenres.isNullOrBlank()) {
             return
         }
 
@@ -44,7 +45,13 @@ object Filters {
                 .set("Referer", "$baseUrl/")
                 .build()
 
-            val doc = client.newCall(GET("$baseUrl/browse", headers)).execute().asJsoup()
+            val response = client.newCall(GET("$baseUrl/browse", headers)).execute()
+            if (!response.isSuccessful) {
+                response.close()
+                return
+            }
+
+            val doc = response.asJsoup()
 
             val genres = mutableListOf<Pair<String, String>>()
             val statuses = mutableListOf<Pair<String, String>>()
@@ -68,6 +75,10 @@ object Filters {
                     wireModel.contains("Season", ignoreCase = true) || wireKey.contains("filter-season-") -> seasons.add(name to value)
                     wireModel.contains("sort", ignoreCase = true) || wireKey.contains("filter-sort-") -> sorts.add(name to value)
                 }
+            }
+
+            if (genres.isEmpty() && statuses.isEmpty()) {
+                return
             }
 
             val editor = preferences.edit()

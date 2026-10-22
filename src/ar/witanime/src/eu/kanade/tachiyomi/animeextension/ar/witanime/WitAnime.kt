@@ -75,7 +75,7 @@ class WitAnime :
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
-        .add("User-Agent", CloudflareInterceptor.DEFAULT_USER_AGENT)
+        .add("User-Agent", USER_AGENT)
         .add("sec-ch-ua", "\"Chromium\";v=\"131\", \"Google Chrome\";v=\"131\", \"Not_A Brand\";v=\"24\"")
         .add("sec-ch-ua-mobile", "?0")
         .add("sec-ch-ua-platform", "\"Windows\"")
@@ -547,7 +547,7 @@ class WitAnime :
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         if (hoster.internalData.isBlank()) {
-            return extractVideosFromUrl(hoster.hosterUrl, hoster.hosterName).sortVideos()
+            return extractVideosFromUrl(hoster.hosterUrl, hoster.hosterName).sortByPreference()
         }
 
         val items = runCatching { hoster.internalData.parseAs<List<ServerItem>>() }.getOrNull()
@@ -624,7 +624,7 @@ class WitAnime :
             }
 
             extractVideosFromUrl(resolvedUrl, "${hoster.hosterName} - ${item.quality}")
-        }.sortVideos()
+        }.sortByPreference()
     }
 
     private suspend fun extractVideosFromUrl(url: String, qualityLabel: String): List<Video> = runCatching {
@@ -694,7 +694,7 @@ class WitAnime :
         }
     }.getOrElse { emptyList() }
 
-    private fun List<Video>.sortVideos(): List<Video> {
+    private fun List<Video>.sortByPreference(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT) ?: PREF_QUALITY_DEFAULT
         return sortedWith(
             compareBy<Video> {
@@ -714,10 +714,11 @@ class WitAnime :
     override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = throw UnsupportedOperationException()
     override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
     override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
     override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
+    override fun videoListParse(response: Response, hoster: Hoster): List<Video> = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -726,7 +727,6 @@ class WitAnime :
             default = PREF_BASE_URL_DEFAULT,
             title = "Base URL",
             summary = "%s",
-            dialogTitle = "Base URL",
             restartRequired = true,
         )
         screen.addListPreference(
@@ -769,6 +769,8 @@ class WitAnime :
     )
 
     companion object {
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
         private const val PREF_BASE_URL_KEY = "pref_base_url"
         private const val PREF_BASE_URL_DEFAULT = "https://witanime.site"
         private const val PREF_SERVER_KEY = "pref_server"
