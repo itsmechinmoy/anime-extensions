@@ -31,6 +31,21 @@ import java.util.concurrent.TimeUnit
 
 class Anikage : Source() {
 
+    override val migration: SharedPreferences.() -> Unit = {
+        val oldType = getString("sub_or_dub", null)
+        if (oldType != null && !contains(PREF_TYPE_KEY)) {
+            edit().putString(PREF_TYPE_KEY, if (oldType.equals("dub", true)) "DUB" else "SUB").apply()
+        }
+        val oldAdult = getBoolean("is_adult", false)
+        if (contains("is_adult") && !contains(PREF_ADULT_KEY)) {
+            edit().putBoolean(PREF_ADULT_KEY, oldAdult).apply()
+        }
+        val oldQuality = getString("quality", null)
+        if (oldQuality != null && !contains(PREF_QUALITY_KEY)) {
+            edit().putString(PREF_QUALITY_KEY, oldQuality).apply()
+        }
+    }
+
     override val name = "Anikage"
 
     override val baseUrl = "https://anikage.cc"
@@ -68,21 +83,6 @@ class Anikage : Source() {
             runCatching {
                 Filters.fetchFilters(client, baseUrl, preferences)
             }
-        }
-    }
-
-    override val migration: SharedPreferences.() -> Unit = {
-        val oldType = getString("sub_or_dub", null)
-        if (oldType != null && !contains(PREF_TYPE_KEY)) {
-            edit().putString(PREF_TYPE_KEY, if (oldType.equals("dub", true)) "DUB" else "SUB").apply()
-        }
-        val oldAdult = getBoolean("is_adult", false)
-        if (contains("is_adult") && !contains(PREF_ADULT_KEY)) {
-            edit().putBoolean(PREF_ADULT_KEY, oldAdult).apply()
-        }
-        val oldQuality = getString("quality", null)
-        if (oldQuality != null && !contains(PREF_QUALITY_KEY)) {
-            edit().putString(PREF_QUALITY_KEY, oldQuality).apply()
         }
     }
 
