@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.animeextension.en.anikage
 
 import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.m3u8server.M3u8ServerManager
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -56,32 +55,30 @@ class Anikage : Source() {
 
     override val supportsLatest = true
 
-    override val supportsRelatedAnimes = false
-
     override val client = network.client.newBuilder()
         .rateLimit(4)
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .set("Origin", baseUrl)
-        .set("Referer", "$baseUrl/")
-
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val m3u8Server by lazy { M3u8ServerManager(client) }
-
-    private val preferredType: String
-        by preferences.delegate(PREF_TYPE_KEY, PREF_TYPE_DEFAULT)
+    private val titleStyle: String
+        by preferences.delegate(PREF_TITLE_KEY, PREF_TITLE_DEFAULT)
 
     private val preferredQuality: String
         by preferences.delegate(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)
 
+    private val preferredType: String
+        by preferences.delegate(PREF_TYPE_KEY, PREF_TYPE_DEFAULT)
+
+    private val forceTsArgs = listOf("demuxer-lavf-o" to "force_mpegts=1")
+    private val forceFfmpegArgs = listOf("force_mpegts" to "1")
+
     init {
         CoroutineScope(Dispatchers.IO).launch {
             runCatching {
-                Filters.fetchFilters(client, baseUrl, preferences)
+                Filters.fetchFilters(client, baseUrl, preferences, headers)
             }
         }
     }
@@ -152,7 +149,7 @@ class Anikage : Source() {
 
         val response = client.get(url, headers)
         val dto = response.parseAs<BrowseResponseDto>()
-        val animes = dto.data.map { it.toSAnime() }
+        val animes = dto.data.map { it.toSAnime(titleStyle) }
         return AnimesPage(animes, dto.hasNext)
     }
 
@@ -164,8 +161,65 @@ class Anikage : Source() {
         val slug = extractSlug(anime.url)
         val response = client.get("$apiUrl/anime/$slug", headers)
         val dto = response.parseAs<DetailsResponseDto>()
-        return (dto.anime ?: AnimeItemDto(slug = slug)).toSAnime().apply {
+        return (dto.anime ?: AnimeItemDto(slug = slug)).toSAnime(titleStyle).apply {
             initialized = true
+        }
+    }
+
+    // =========================== Related Anime ============================
+
+    override val disableRelatedAnimesBySearch = true
+
+    override suspend fun fetchRelatedAnimeList(anime: SAnime): List<SAnime> {
+        val slug = extractSlug(anime.url)
+        val response = client.get("$apiUrl/anime/$slug", headers)
+        val dto = response.parseAs<DetailsResponseDto>()
+        val info = dto.anime ?: return emptyList()
+
+        return buildList {
+            info.relations?.forEach { rel ->
+                val relSlug = rel.slug?.takeIf { it.isNotBlank() } ?: return@forEach
+                if (relSlug == slug || any { it.url == "/anime/info/$relSlug" }) return@forEach
+                val title = rel.title?.best(titleStyle)?.takeIf { it.isNotBlank() } ?: return@forEach
+                add(
+                    SAnime.create().apply {
+                        url = "/anime/info/$relSlug"
+                        this.title = title
+                        thumbnail_url = rel.coverImage ?: rel.bannerImage
+                        status = when (rel.status?.uppercase()) {
+                            "RELEASING" -> SAnime.ONGOING
+                            "FINISHED" -> SAnime.COMPLETED
+                            "NOT_YET_RELEASED" -> SAnime.LICENSED
+                            "HIATUS" -> SAnime.ON_HIATUS
+                            "CANCELLED" -> SAnime.CANCELLED
+                            else -> SAnime.UNKNOWN
+                        }
+                        genre = listOfNotNull(rel.format, rel.relationType).joinToString()
+                    },
+                )
+            }
+
+            info.recommendations?.forEach { rec ->
+                val recSlug = rec.slug?.takeIf { it.isNotBlank() } ?: return@forEach
+                if (recSlug == slug || any { it.url == "/anime/info/$recSlug" }) return@forEach
+                val title = rec.title?.best(titleStyle)?.takeIf { it.isNotBlank() } ?: return@forEach
+                add(
+                    SAnime.create().apply {
+                        url = "/anime/info/$recSlug"
+                        this.title = title
+                        thumbnail_url = rec.coverImage ?: rec.bannerImage
+                        status = when (rec.status?.uppercase()) {
+                            "RELEASING" -> SAnime.ONGOING
+                            "FINISHED" -> SAnime.COMPLETED
+                            "NOT_YET_RELEASED" -> SAnime.LICENSED
+                            "HIATUS" -> SAnime.ON_HIATUS
+                            "CANCELLED" -> SAnime.CANCELLED
+                            else -> SAnime.UNKNOWN
+                        }
+                        genre = rec.format
+                    },
+                )
+            }
         }
     }
 
@@ -181,7 +235,7 @@ class Anikage : Source() {
 
     override fun getEpisodeUrl(episode: SEpisode): String {
         val (slug, epNum) = parseEpisodeUrl(episode.url)
-        return "$baseUrl/watch/$slug/$epNum"
+        return "$baseUrl/anime/watch/$slug?ep=$epNum"
     }
 
     // ============================ Video Links =============================
@@ -280,13 +334,18 @@ class Anikage : Source() {
                     )
                 }.getOrDefault(emptyList())
                 if (videos.isNotEmpty()) {
-                    return if (entry.url.needsLocalProxy()) videos.viaLocalProxy(referer) else videos
+                    return videos.map { video ->
+                        video.copy(
+                            mpvArgs = forceTsArgs,
+                            ffmpegStreamArgs = forceFfmpegArgs,
+                        )
+                    }
                 }
             }
         }
 
         // Safety net in case the token key is rotated: scrape the embed page like before.
-        return when {
+        val fallbackVideos = when {
             entry.embedUrl.isEmpty() -> emptyList()
 
             "megaplay.buzz" in entry.embedUrl || "vidtube.site" in entry.embedUrl ->
@@ -294,35 +353,10 @@ class Anikage : Source() {
 
             else -> vibePlayerVideos(prefix, entry.embedUrl)
         }
-    }
-
-    /**
-     * Re-serves already-resolved media playlists through the bundled local HLS proxy.
-     *
-     * Two hosts cannot be handed to the player directly. `vivibebe.site` keeps its segments
-     * on an image CDN that only answers when the Referer is re-issued on every segment
-     * request, and `echovideo.to` returns each playlist as `image/jpeg` from an
-     * extension-less URL, so the player never recognises it as HLS in the first place. The
-     * proxy re-fetches with our headers, strips any fake image header off the segments, and
-     * serves both playlist and segments under the content types the player expects.
-     */
-    private fun List<Video>.viaLocalProxy(referer: String): List<Video> {
-        if (isEmpty()) return this
-        runCatching { if (!m3u8Server.isRunning()) m3u8Server.startServer() }
-        if (!m3u8Server.isRunning()) return this
-
-        val userAgent = headers["User-Agent"]
-        return map { video ->
-            val proxied = runCatching {
-                m3u8Server.processM3u8Url(video.videoUrl, referer.takeIf { it.isNotBlank() }, userAgent)
-            }.getOrNull() ?: return@map video
-
-            Video(
-                videoUrl = proxied,
-                videoTitle = video.videoTitle,
-                headers = video.headers,
-                subtitleTracks = video.subtitleTracks,
-                audioTracks = video.audioTracks,
+        return fallbackVideos.map { video ->
+            video.copy(
+                mpvArgs = forceTsArgs,
+                ffmpegStreamArgs = forceFfmpegArgs,
             )
         }
     }
@@ -403,16 +437,26 @@ class Anikage : Source() {
         }
     }
 
-    private fun extractSlug(url: String): String = url.removeSuffix("/").substringAfterLast("/")
+    private fun extractSlug(url: String): String {
+        return if (url.contains("/episodes/")) {
+            url.substringAfter("/anime/").substringBefore("/episodes/")
+        } else {
+            url.substringBefore("#").substringBefore("?").removeSuffix("/").substringAfterLast("/")
+        }
+    }
 
     private fun parseEpisodeUrl(url: String): Pair<String, String> {
         if (url.contains("/episodes/")) {
             val slug = url.substringAfter("/anime/").substringBefore("/episodes/")
-            val epNum = url.substringAfter("/episodes/").substringBefore("/sources").substringBefore("/")
+            val epNum = url.substringAfter("/episodes/").substringBefore("/sources").substringBefore("/servers").substringBefore("/")
             return slug to epNum
         }
-        val slug = url.substringBefore("#").removeSuffix("/").substringAfterLast("/")
-        val epNum = url.substringAfter("#ep=", "1")
+        val slug = url.substringBefore("#").substringBefore("?").removeSuffix("/").substringAfterLast("/")
+        val epNum = when {
+            url.contains("#ep=") -> url.substringAfter("#ep=").substringBefore("&")
+            url.contains("ep=") -> url.substringAfter("ep=").substringBefore("&")
+            else -> "1"
+        }
         return slug to epNum
     }
 
@@ -420,20 +464,28 @@ class Anikage : Source() {
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         screen.addListPreference(
+            key = PREF_TITLE_KEY,
+            title = "Preferred Title Style",
+            summary = "%s",
+            entries = listOf("English", "Romaji"),
+            entryValues = listOf("english", "romaji"),
+            default = PREF_TITLE_DEFAULT,
+        )
+        screen.addListPreference(
+            key = PREF_QUALITY_KEY,
+            title = "Preferred Quality",
+            summary = "%s",
+            entries = listOf("1080p", "720p", "360p"),
+            entryValues = listOf("1080p", "720p", "360p"),
+            default = PREF_QUALITY_DEFAULT,
+        )
+        screen.addListPreference(
             key = PREF_TYPE_KEY,
             title = "Preferred audio type",
             summary = "%s",
             entries = listOf("Sub", "Dub"),
             entryValues = listOf("SUB", "DUB"),
             default = PREF_TYPE_DEFAULT,
-        )
-        screen.addListPreference(
-            key = PREF_QUALITY_KEY,
-            title = "Preferred quality",
-            summary = "%s",
-            entries = listOf("1080p", "720p", "360p"),
-            entryValues = listOf("1080p", "720p", "360p"),
-            default = PREF_QUALITY_DEFAULT,
         )
         screen.addSwitchPreference(
             key = PREF_ADULT_KEY,
@@ -448,6 +500,9 @@ class Anikage : Source() {
         private val VIBE_SRC_REGEX by lazy { Regex("""const\s+src\s*=\s*"([^"]+\.m3u8[^"]*)"""") }
         private val M3U8_REGEX by lazy { Regex("""(https?://[^"'\s<>]+\.m3u8[^"'\s<>]*)""") }
 
+        private const val PREF_TITLE_KEY = "title_format"
+        private const val PREF_TITLE_DEFAULT = "english"
+
         private const val PREF_TYPE_KEY = "preferred_type"
         private const val PREF_TYPE_DEFAULT = "SUB"
 
@@ -455,12 +510,5 @@ class Anikage : Source() {
         private const val PREF_QUALITY_DEFAULT = "1080p"
 
         private const val PREF_ADULT_KEY = "show_adult"
-
-        private val PROXY_HOSTS = setOf("vivibebe.site", "echovideo.to", "krussdomi.com")
-
-        private fun String.needsLocalProxy(): Boolean {
-            val host = hostOrEmpty()
-            return PROXY_HOSTS.any { host == it || host.endsWith(".$it") }
-        }
     }
 }

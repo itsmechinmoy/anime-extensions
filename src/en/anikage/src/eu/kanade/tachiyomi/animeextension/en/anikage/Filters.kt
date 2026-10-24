@@ -37,29 +37,28 @@ object Filters {
         "TITLE_ENGLISH" to "title",
     )
 
-    suspend fun fetchFilters(client: OkHttpClient, baseUrl: String, preferences: SharedPreferences) {
+    suspend fun fetchFilters(client: OkHttpClient, baseUrl: String, preferences: SharedPreferences, headers: Headers) {
         try {
-            val headers = Headers.Builder()
-                .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            val fetchHeaders = headers.newBuilder()
                 .set("Referer", "$baseUrl/")
                 .build()
 
-            val html = client.get("$baseUrl/browse", headers).bodyString()
+            val html = client.get("$baseUrl/browse", fetchHeaders).bodyString()
             val appFile = APP_REGEX.find(html)?.let { match ->
                 match.groupValues.drop(1).firstOrNull { it.isNotBlank() }
             } ?: return
 
-            val appJs = client.get("$baseUrl/_app/immutable/entry/$appFile", headers).bodyString()
+            val appJs = client.get("$baseUrl/_app/immutable/entry/$appFile", fetchHeaders).bodyString()
             val browseNodeId = BROWSE_NODE_REGEX.find(appJs)?.groupValues?.get(1) ?: return
             val nodeFile = Regex("""nodes/$browseNodeId\.([a-zA-Z0-9_\-]+)\.js""").find(appJs)?.value ?: return
 
-            val nodeJs = client.get("$baseUrl/_app/immutable/$nodeFile", headers).bodyString()
+            val nodeJs = client.get("$baseUrl/_app/immutable/$nodeFile", fetchHeaders).bodyString()
             var chunkName = BIFE_CHUNK_REGEX.find(nodeJs)?.groupValues?.get(1)
             if (chunkName == null) {
                 val matches = CHUNK_IMPORT_REGEX.findAll(nodeJs)
                 for (match in matches) {
                     val candidate = match.groupValues[1]
-                    val content = client.get("$baseUrl/_app/immutable/chunks/$candidate", headers).bodyString()
+                    val content = client.get("$baseUrl/_app/immutable/chunks/$candidate", fetchHeaders).bodyString()
                     if (content.contains("genres") && content.contains("tags")) {
                         chunkName = candidate
                         break
@@ -68,7 +67,7 @@ object Filters {
             }
             if (chunkName == null) return
 
-            val chunkJs = client.get("$baseUrl/_app/immutable/chunks/$chunkName", headers).bodyString()
+            val chunkJs = client.get("$baseUrl/_app/immutable/chunks/$chunkName", fetchHeaders).bodyString()
 
             val genres = GENRE_REGEX.findAll(chunkJs).map { it.groupValues[1] }.distinct().toList()
             val tags = TAG_REGEX.findAll(chunkJs).map { it.groupValues[1] }.distinct().toList()

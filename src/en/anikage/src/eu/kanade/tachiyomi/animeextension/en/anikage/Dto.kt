@@ -6,6 +6,8 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -27,7 +29,11 @@ data class TitleDto(
     val native: String? = null,
     val userPreferred: String? = null,
 ) {
-    fun best(): String = english ?: romaji ?: userPreferred ?: native ?: ""
+    fun best(style: String = "english"): String = if (style == "english") {
+        english ?: romaji ?: userPreferred ?: native ?: ""
+    } else {
+        romaji ?: english ?: userPreferred ?: native ?: ""
+    }
 }
 
 @Serializable
@@ -45,6 +51,27 @@ data class StudioDto(
 )
 
 @Serializable
+data class RelationDto(
+    val slug: String? = null,
+    val title: TitleDto? = null,
+    val format: String? = null,
+    val status: String? = null,
+    val coverImage: String? = null,
+    val bannerImage: String? = null,
+    val relationType: String? = null,
+)
+
+@Serializable
+data class RecommendationDto(
+    val slug: String? = null,
+    val title: TitleDto? = null,
+    val format: String? = null,
+    val status: String? = null,
+    val coverImage: String? = null,
+    val bannerImage: String? = null,
+)
+
+@Serializable
 data class AnimeItemDto(
     val slug: String? = null,
     val title: TitleDto? = null,
@@ -58,9 +85,14 @@ data class AnimeItemDto(
     val year: Int? = null,
     val season: String? = null,
     val totalEpisodes: Int? = null,
+    val relations: List<RelationDto>? = null,
+    val recommendations: List<RecommendationDto>? = null,
 ) {
-    fun toSAnime(): SAnime = SAnime.create().apply {
-        title = this@AnimeItemDto.title?.best().orEmpty()
+    fun toSAnime(titleStyle: String = "english"): SAnime = SAnime.create().apply {
+        val resolvedTitle = title?.best(titleStyle)?.takeIf { it.isNotBlank() }
+            ?: slug?.replace('-', ' ')?.replaceFirstChar { it.uppercase() }
+            ?: "Unknown"
+        this.title = resolvedTitle
         url = "/anime/info/${slug.orEmpty()}"
         thumbnail_url = coverImage?.best() ?: bannerImage
         description = buildDescription()
@@ -78,14 +110,20 @@ data class AnimeItemDto(
     }
 
     private fun buildDescription(): String {
-        val plot = description?.replace(Regex("<br\\s*/?>"), "\n")?.replace(Regex("<[^>]+>"), "")?.trim()
+        val plot = description?.let { raw ->
+            val doc = Jsoup.parseBodyFragment(raw)
+            doc.outputSettings(Document.OutputSettings().prettyPrint(false))
+            doc.select("br").before("\n")
+            doc.select("p").before("\n")
+            doc.text().trim().takeIf { it.isNotBlank() }
+        }
         val meta = buildList {
             format?.let { add("Format: $it") }
             year?.let { add("Year: $it") }
             season?.let { add("Season: ${it.lowercase().replaceFirstChar { c -> c.uppercase() }}") }
             totalEpisodes?.let { add("Episodes: $it") }
         }.joinToString(" • ")
-        return listOf(plot, meta).filter { !it.isNullOrBlank() }.joinToString("\n\n")
+        return listOfNotNull(plot, meta.takeIf { it.isNotBlank() }).joinToString("\n\n")
     }
 }
 
@@ -105,7 +143,7 @@ data class EpisodeDto(
         val fillerTag = if (isFiller == true) " (Filler)" else ""
         name = "Episode $epLabel${title?.takeIf { it.isNotBlank() }?.let { " - $it" } ?: ""}$fillerTag"
         episode_number = num
-        url = "$slug#ep=$epLabel"
+        url = "/api/media/anime/$slug/episodes/$epLabel/servers"
         preview_url = image
         summary = description
         date_upload = parseDate(airDate)
