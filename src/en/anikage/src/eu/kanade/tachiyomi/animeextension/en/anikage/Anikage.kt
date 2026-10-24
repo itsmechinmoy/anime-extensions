@@ -437,12 +437,10 @@ class Anikage : Source() {
         }
     }
 
-    private fun extractSlug(url: String): String {
-        return if (url.contains("/episodes/")) {
-            url.substringAfter("/anime/").substringBefore("/episodes/")
-        } else {
-            url.substringBefore("#").substringBefore("?").removeSuffix("/").substringAfterLast("/")
-        }
+    private fun extractSlug(url: String): String = if (url.contains("/episodes/")) {
+        url.substringAfter("/anime/").substringBefore("/episodes/")
+    } else {
+        url.substringBefore("#").substringBefore("?").removeSuffix("/").substringAfterLast("/")
     }
 
     private fun parseEpisodeUrl(url: String): Pair<String, String> {
