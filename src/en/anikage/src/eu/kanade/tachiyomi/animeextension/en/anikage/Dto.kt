@@ -88,25 +88,27 @@ data class AnimeItemDto(
     val relations: List<RelationDto>? = null,
     val recommendations: List<RecommendationDto>? = null,
 ) {
-    fun toSAnime(titleStyle: String = "english"): SAnime = SAnime.create().apply {
+    fun toSAnime(titleStyle: String = "english"): SAnime {
         val resolvedTitle = title?.best(titleStyle)?.takeIf { it.isNotBlank() }
             ?: slug?.replace('-', ' ')?.replaceFirstChar { it.uppercase() }
             ?: "Unknown"
-        this.title = resolvedTitle
-        url = "/anime/info/${slug.orEmpty()}"
-        thumbnail_url = coverImage?.best() ?: bannerImage
-        description = buildDescription()
-        genre = genres?.joinToString()
-        author = studios?.mapNotNull { it.name }?.joinToString()?.takeIf { it.isNotBlank() }
-        status = when (this@AnimeItemDto.status?.uppercase()) {
-            "RELEASING" -> SAnime.ONGOING
-            "FINISHED" -> SAnime.COMPLETED
-            "NOT_YET_RELEASED" -> SAnime.LICENSED
-            "HIATUS" -> SAnime.ON_HIATUS
-            "CANCELLED" -> SAnime.CANCELLED
-            else -> SAnime.UNKNOWN
+        return SAnime.create().apply {
+            title = resolvedTitle
+            url = "/anime/info/${slug.orEmpty()}"
+            thumbnail_url = coverImage?.best() ?: bannerImage
+            description = buildDescription()
+            genre = genres?.joinToString()
+            author = studios?.mapNotNull { it.name }?.joinToString()?.takeIf { it.isNotBlank() }
+            status = when (this@AnimeItemDto.status?.uppercase()) {
+                "RELEASING" -> SAnime.ONGOING
+                "FINISHED" -> SAnime.COMPLETED
+                "NOT_YET_RELEASED" -> SAnime.LICENSED
+                "HIATUS" -> SAnime.ON_HIATUS
+                "CANCELLED" -> SAnime.CANCELLED
+                else -> SAnime.UNKNOWN
+            }
+            fetch_type = FetchType.Episodes
         }
-        fetch_type = FetchType.Episodes
     }
 
     private fun buildDescription(): String {
