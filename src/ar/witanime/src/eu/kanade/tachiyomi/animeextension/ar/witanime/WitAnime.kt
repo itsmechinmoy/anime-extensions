@@ -22,8 +22,8 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
@@ -50,17 +50,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import kotlin.time.Duration.Companion.seconds
 
-class WitAnime :
+@Source
+abstract class WitAnime :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "WIT ANIME"
-
-    override val baseUrl: String
-        get() = preferences.getString(PREF_BASE_URL_KEY, PREF_BASE_URL_DEFAULT) ?: PREF_BASE_URL_DEFAULT
-
-    override val lang = "ar"
-
     override val supportsLatest = true
 
     override val client: OkHttpClient by lazy {
@@ -722,13 +715,6 @@ class WitAnime :
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        screen.addEditTextPreference(
-            key = PREF_BASE_URL_KEY,
-            default = PREF_BASE_URL_DEFAULT,
-            title = "Base URL",
-            summary = "%s",
-            restartRequired = true,
-        )
         screen.addListPreference(
             key = PREF_QUALITY_KEY,
             default = PREF_QUALITY_DEFAULT,
@@ -771,8 +757,6 @@ class WitAnime :
     companion object {
         private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-        private const val PREF_BASE_URL_KEY = "pref_base_url"
-        private const val PREF_BASE_URL_DEFAULT = "https://witanime.site"
         private const val PREF_SERVER_KEY = "pref_server"
         private const val PREF_SERVER_DEFAULT = "auto"
         private const val PREF_QUALITY_KEY = "pref_quality"
