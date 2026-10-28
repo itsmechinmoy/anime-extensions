@@ -29,11 +29,7 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -74,12 +70,12 @@ abstract class WitAnime :
     }
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("User-Agent", USER_AGENT)
-        .add("sec-ch-ua", "\"Chromium\";v=\"131\", \"Google Chrome\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-        .add("sec-ch-ua-mobile", "?0")
-        .add("sec-ch-ua-platform", "\"Windows\"")
-        .add("Accept-Language", "ar,en-US;q=0.9,en;q=0.8")
+        .set("Referer", "$baseUrl/")
+        .set("User-Agent", USER_AGENT)
+        .set("sec-ch-ua", "\"Chromium\";v=\"131\", \"Google Chrome\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+        .set("sec-ch-ua-mobile", "?0")
+        .set("sec-ch-ua-platform", "\"Windows\"")
+        .set("Accept-Language", "ar,en-US;q=0.9,en;q=0.8")
 
     // Extractors
     private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
@@ -101,16 +97,6 @@ abstract class WitAnime :
                 else -> "FHD"
             }
             edit().putString(PREF_QUALITY_KEY, mapped).apply()
-        }
-    }
-
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-    init {
-        scope.launch {
-            runCatching {
-                Filters.fetchFilters(client, baseUrl, preferences)
-            }
         }
     }
 
@@ -253,13 +239,7 @@ abstract class WitAnime :
         return AnimesPage(animeList, hasNext)
     }
 
-    override fun getFilterList(): AnimeFilterList = Filters.build(preferences, baseUrl) {
-        scope.launch {
-            runCatching {
-                Filters.fetchFilters(client, baseUrl, preferences)
-            }
-        }
-    }
+    override fun getFilterList(): AnimeFilterList = Filters.build()
 
     // =========================== Anime Details ============================
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {

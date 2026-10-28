@@ -10,7 +10,13 @@ yuzono {
 
     source {
         lang = "ar"
-        baseUrl = "https://witanime.cyou"
+        baseUrl("https://witanime.site") {
+            mirrors = listOf(
+                "https://witanime.cyou",
+                "https://witanime.pics",
+                "https://witanime.com",
+            )
+        }
     }
 }
 
@@ -23,5 +29,4 @@ dependencies {
     implementation(project(":lib:playlistutils"))
     implementation(project(":lib:streamtapeextractor"))
     implementation(project(":lib:universalextractor"))
-    implementation(project(":lib:unpacker"))
 }
