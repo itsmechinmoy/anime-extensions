@@ -7,29 +7,29 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.torrentutils.TorrentUtils
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.SocketTimeoutException
 import java.util.Locale
 
 @Source
 abstract class PTorrent :
-    ParsedAnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     private val preferences by getPreferencesLazy()
@@ -37,32 +37,30 @@ abstract class PTorrent :
     override val supportsLatest = false
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", baseUrl)
+        .add("Referer", "$baseUrl/")
 
     // ============================== Popular ===============================
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/page/$page")
+    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/page/$page", headers)
 
-    override fun popularAnimeSelector(): String = "div.image-container div.image-wrapper"
+    override fun popularAnimeParse(response: Response): AnimesPage {
+        val document = response.asJsoup()
+        val animeList = document.select("div.image-container div.image-wrapper").map { animeFromElement(it) }
+        val hasNext = document.selectFirst("div.pagination a:contains(Next)") != null
+        return AnimesPage(animeList, hasNext)
+    }
 
-    override fun popularAnimeFromElement(element: Element): SAnime {
+    private fun animeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
         anime.setUrlWithoutDomain(element.select("a.overlay").attr("href"))
         anime.title = element.select("a.overlay").text().trim()
         anime.thumbnail_url = element.select("img").attr("src")
-
         return anime
     }
-
-    override fun popularAnimeNextPageSelector(): String = "div.pagination a:contains(Next)"
 
     // =============================== Latest ===============================
     override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
 
-    override fun latestUpdatesSelector(): String = throw UnsupportedOperationException()
-
-    override fun latestUpdatesFromElement(element: Element): SAnime = throw UnsupportedOperationException()
-
-    override fun latestUpdatesNextPageSelector() = throw UnsupportedOperationException()
+    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     // =============================== Search ===============================
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
@@ -70,9 +68,8 @@ abstract class PTorrent :
         if (url != null && url.host.removePrefix("www.") == baseUrl.toHttpUrl().host.removePrefix("www.")) {
             val path = url.encodedPath
             if (!path.endsWith(".html")) throw Exception("Unsupported url")
-            return client.newCall(GET(baseUrl + path, headers))
-                .awaitSuccess()
-                .use { searchAnimeByUrlParse(it, path) }
+            val response = client.get(baseUrl + path, headers)
+            return searchAnimeByUrlParse(response, path)
         }
 
         return super.getSearchAnime(page, query, filters)
@@ -80,9 +77,9 @@ abstract class PTorrent :
 
     private fun searchAnimeByUrlParse(response: Response, path: String): AnimesPage {
         val document = response.asJsoup()
-        val anime = animeDetailsParse(document).apply {
-            url = path
-            title = document.selectFirst("h1")!!.text()
+        val anime = animeDetailsParse(response).apply {
+            this.url = path
+            title = document.selectFirst("h1")?.text().orEmpty()
             thumbnail_url = document.selectFirst("div.categories ~ img")?.absUrl("src")?.toListingThumbnail()
         }
         return AnimesPage(listOf(anime), false)
@@ -103,32 +100,44 @@ abstract class PTorrent :
         }.toString()
 
         return if (query.isNotEmpty()) {
-            GET("$baseUrl/s.php?search=$encodedQuery&page=$page")
+            GET("$baseUrl/s.php?search=$encodedQuery&page=$page", headers)
         } else {
-            GET("$baseUrl/catalog/$cat/page/$page")
+            GET("$baseUrl/catalog/$cat/page/$page", headers)
         }
     }
 
-    override fun searchAnimeSelector() = popularAnimeSelector()
-
-    override fun searchAnimeFromElement(element: Element) = popularAnimeFromElement(element)
-
-    override fun searchAnimeNextPageSelector() = popularAnimeNextPageSelector()
+    override fun searchAnimeParse(response: Response): AnimesPage {
+        if (response.request.url.encodedPath.endsWith(".html")) {
+            val path = response.request.url.encodedPath
+            return searchAnimeByUrlParse(response, path)
+        }
+        return popularAnimeParse(response)
+    }
 
     // =========================== Anime Details ============================
-    override fun animeDetailsParse(document: Document): SAnime {
+    override fun animeDetailsParse(response: Response): SAnime {
+        val document = response.asJsoup()
         val anime = SAnime.create()
-        anime.description = document.select("div.article-content").html().replace(Regex("<(?!br\\s*/?)[^>]+>"), "").replace("<br>", "\n").replace("<br/>", "\n")
+        anime.description = document.select("div.article-content").html()
+            .replace(Regex("<(?!br\\s*/?)[^>]+>"), "")
+            .replace("<br>", "\n")
+            .replace("<br/>", "\n")
         return anime
     }
 
-    // ============================== Episodes ==============================
-    override fun episodeListSelector() = "div.download-container div.download-button"
+    override fun getAnimeUrl(anime: SAnime): String = baseUrl + anime.url
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.asJsoup()
+    override fun getEpisodeUrl(episode: SEpisode): String = if (episode.url.startsWith("magnet:")) episode.url else baseUrl + episode.url
+
+    // ============================== Episodes ==============================
+    override fun episodeListRequest(anime: SAnime): Request = GET(baseUrl + anime.url, headers)
+
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
+
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val document = client.get(baseUrl + anime.url, headers).asJsoup()
         val downloadButtonUrl = document.select("div.download-container a.download-button").attr("href")
-        val downloadPage = client.newCall(GET("$baseUrl$downloadButtonUrl")).execute().asJsoup()
+        val downloadPage = client.get("$baseUrl$downloadButtonUrl", headers).asJsoup()
         val torrentFileUrl = downloadPage.select("a.download-button").attr("href")
 
         if (torrentFileUrl.isEmpty()) throw Exception("No Torrent Found!")
@@ -173,26 +182,30 @@ abstract class PTorrent :
         }
     }
 
-    private fun fetchTrackers(): String {
-        val request = Request.Builder()
-            .url("https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_all_http.txt")
-            .build()
+    private suspend fun fetchTrackers(): String = runCatching {
+        client.get("https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_all_http.txt")
+            .body.string().trim()
+    }.getOrDefault("")
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw Exception("Unexpected code $response")
-            return response.body.string().trim()
-        }
-    }
-
-    override fun episodeFromElement(element: Element) = throw Exception("Not used")
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     // ============================ Video Links =============================
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> = listOf(Video(episode.url, episode.name, episode.url))
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
+        Hoster(
+            hosterName = "Torrent",
+            videoList = listOf(
+                Video(
+                    videoUrl = episode.url,
+                    videoTitle = episode.name,
+                ),
+            ),
+        ),
+    )
 
-    override fun videoListSelector() = throw Exception("Not used")
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun videoFromElement(element: Element) = throw Exception("Not used")
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
