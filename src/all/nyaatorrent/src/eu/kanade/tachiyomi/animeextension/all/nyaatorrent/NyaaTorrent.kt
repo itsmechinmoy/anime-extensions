@@ -18,6 +18,7 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.CustomUrlPreferences
 import keiyoushi.utils.getPreferences
+import kotlinx.coroutines.CancellationException
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -92,8 +93,13 @@ abstract class NyaaTorrent :
         }
         if (query.startsWith(PREFIX_SEARCH)) {
             val id = query.removePrefix(PREFIX_SEARCH)
-            val response = runCatching { client.get("$baseUrl/view/$id", headers) }.getOrNull()
-                ?: return AnimesPage(emptyList(), false)
+            val response = try {
+                client.get("$baseUrl/view/$id", headers)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return AnimesPage(emptyList(), false)
+            }
             return searchAnimeByIdParse(response, id)
         }
         return super.getSearchAnime(page, query, filters)
