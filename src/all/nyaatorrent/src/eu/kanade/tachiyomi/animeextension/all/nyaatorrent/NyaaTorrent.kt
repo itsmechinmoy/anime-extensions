@@ -92,16 +92,19 @@ abstract class NyaaTorrent :
         }
         if (query.startsWith(PREFIX_SEARCH)) {
             val id = query.removePrefix(PREFIX_SEARCH)
-            val response = client.get("$baseUrl/view/$id", headers)
+            val response = runCatching { client.get("$baseUrl/view/$id", headers) }.getOrNull()
+                ?: return AnimesPage(emptyList(), false)
             return searchAnimeByIdParse(response, id)
         }
         return super.getSearchAnime(page, query, filters)
     }
 
     private fun searchAnimeByIdParse(response: Response, id: String): AnimesPage {
+        if (!response.isSuccessful) return AnimesPage(emptyList(), false)
         val details = animeDetailsParse(response).apply {
             setUrlWithoutDomain("/view/$id")
         }
+        if (details.title.isBlank()) return AnimesPage(emptyList(), false)
         return AnimesPage(listOf(details), false)
     }
 
@@ -133,6 +136,7 @@ abstract class NyaaTorrent :
             val anime = animeDetailsParse(response).apply {
                 setUrlWithoutDomain(response.request.url.encodedPath)
             }
+            if (anime.title.isBlank()) return AnimesPage(emptyList(), false)
             return AnimesPage(listOf(anime), false)
         }
         return popularAnimeParse(response)
@@ -143,6 +147,7 @@ abstract class NyaaTorrent :
         val document = response.asJsoup()
         val anime = SAnime.create()
 
+        anime.title = document.selectFirst("h3.panel-title")?.text()?.trim().orEmpty()
         val category = document.select("div.panel-body > div:nth-child(1) > div:nth-child(2)").text()
         val seeders = document.select("div.panel-body > div:nth-child(2) > div:nth-child(4)").text()
         val leechers = document.select("div.panel-body > div:nth-child(3) > div:nth-child(4) > span").text()
