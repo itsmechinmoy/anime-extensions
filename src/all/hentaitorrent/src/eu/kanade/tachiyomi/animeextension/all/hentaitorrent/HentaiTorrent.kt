@@ -18,11 +18,13 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
+import kotlinx.coroutines.CancellationException
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.SocketTimeoutException
 import java.util.Locale
@@ -76,9 +78,11 @@ abstract class HentaiTorrent :
 
     private fun searchAnimeByUrlParse(response: Response, path: String): AnimesPage {
         val document = response.asJsoup()
-        val anime = animeDetailsParse(response).apply {
+        val title = document.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw Exception("Anime not found")
+        val anime = animeDetailsParse(document).apply {
             this.url = path
-            title = document.selectFirst("h1")?.text().orEmpty()
+            this.title = title
             thumbnail_url = document.selectFirst("div.categories ~ img")?.absUrl("src")?.toListingThumbnail()
         }
         return AnimesPage(listOf(anime), false)
@@ -114,8 +118,9 @@ abstract class HentaiTorrent :
     }
 
     // =========================== Anime Details ============================
-    override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.asJsoup()
+    override fun animeDetailsParse(response: Response): SAnime = animeDetailsParse(response.asJsoup())
+
+    private fun animeDetailsParse(document: Document): SAnime {
         val anime = SAnime.create()
         anime.description = document.select("div.article-content").html()
             .replace(Regex("<(?!br\\s*/?)[^>]+>"), "")
@@ -129,8 +134,6 @@ abstract class HentaiTorrent :
     override fun getEpisodeUrl(episode: SEpisode): String = if (episode.url.startsWith("magnet:")) episode.url else baseUrl + episode.url
 
     // ============================== Episodes ==============================
-    override fun episodeListRequest(anime: SAnime): Request = GET(baseUrl + anime.url, headers)
-
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
@@ -181,10 +184,14 @@ abstract class HentaiTorrent :
         }
     }
 
-    private suspend fun fetchTrackers(): String = runCatching {
-        client.get("https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_all_http.txt")
+    private suspend fun fetchTrackers(): String = try {
+        client.get("https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_all_http.txt", Headers.headersOf())
             .body.string().trim()
-    }.getOrDefault("")
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        FALLBACK_TRACKERS
+    }
 
     override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
@@ -265,5 +272,7 @@ abstract class HentaiTorrent :
 
         private const val IS_AUDIO_KEY = "audio"
         private const val IS_AUDIO_DEFAULT = false
+
+        private const val FALLBACK_TRACKERS = "udp://tracker.opentrackr.org:1337/announce\nudp://open.stealth.si:80/announce\nudp://tracker.torrent.eu.org:451/announce\nudp://explodie.org:6969/announce"
     }
 }
