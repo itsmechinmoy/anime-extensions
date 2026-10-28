@@ -66,6 +66,13 @@ abstract class WitAnime :
             .build()
     }
 
+    private val noRedirectClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
+
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
         .add("User-Agent", USER_AGENT)
@@ -585,26 +592,52 @@ abstract class WitAnime :
 
             // 2. Gate endpoint to follow redirect.
             // DO NOT pass the watch page as Referer: WitAnime gate returns 404 when Referer is sent!
-            val gateBuilder = Request.Builder()
-                .url("$cleanBaseUrl$gateEndpoint${item.token}")
-                .headers(headers)
-                .removeHeader("Referer")
-                .header("Sec-Fetch-Dest", if (item.isDownload) "document" else "iframe")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-Site", "same-origin")
+            val baseHost = runCatching { cleanBaseUrl.toHttpUrl().host }.getOrNull()
+            var currentUrl = "$cleanBaseUrl$gateEndpoint${item.token}"
+            var finalUrl = ""
+            var gateHtml = ""
 
-            if (gateCookies.isNotBlank()) {
-                gateBuilder.header("Cookie", gateCookies)
+            for (hop in 0 until 5) {
+                val isSameHost = runCatching { currentUrl.toHttpUrl().host == baseHost }.getOrDefault(false)
+                val gateBuilder = Request.Builder()
+                    .url(currentUrl)
+                    .headers(headers)
+                    .removeHeader("Referer")
+                    .header("Sec-Fetch-Dest", if (item.isDownload) "document" else "iframe")
+                    .header("Sec-Fetch-Mode", "navigate")
+                    .header("Sec-Fetch-Site", if (isSameHost) "same-origin" else "cross-site")
+
+                if (isSameHost && gateCookies.isNotBlank()) {
+                    gateBuilder.header("Cookie", gateCookies)
+                }
+
+                val resp = runCatching { noRedirectClient.newCall(gateBuilder.build()).execute() }.getOrNull()
+                    ?: break
+
+                val (location, html) = resp.use { r ->
+                    val loc = r.header("Location")
+                    val bodyStr = if (r.isSuccessful && currentUrl.contains("/watch/")) r.body?.string().orEmpty() else ""
+                    loc to bodyStr
+                }
+
+                if (!location.isNullOrBlank()) {
+                    val nextUrl = runCatching { currentUrl.toHttpUrl().resolve(location)?.toString() }.getOrNull() ?: location
+                    val nextHost = runCatching { nextUrl.toHttpUrl().host }.getOrNull()
+                    finalUrl = nextUrl
+                    if (nextHost != baseHost) {
+                        // Redirected to third-party host; stop before sending WitAnime session cookies
+                        break
+                    }
+                    currentUrl = nextUrl
+                } else {
+                    finalUrl = currentUrl
+                    gateHtml = html
+                    break
+                }
             }
 
-            val gateClient = client.newBuilder().followRedirects(true).build()
-            val gateResp = runCatching { gateClient.newCall(gateBuilder.build()).execute() }.getOrNull()
-                ?: return@parallelCatchingFlatMap emptyList()
-
-            val (finalUrl, gateHtml) = gateResp.use { resp ->
-                val fUrl = resp.request.url.toString()
-                val html = if (fUrl.contains("/watch/")) resp.body?.string().orEmpty() else ""
-                fUrl to html
+            if (finalUrl.isBlank() || finalUrl == "$cleanBaseUrl$gateEndpoint${item.token}") {
+                return@parallelCatchingFlatMap emptyList()
             }
 
             val resolvedUrl = if (!finalUrl.contains("/watch/")) {
