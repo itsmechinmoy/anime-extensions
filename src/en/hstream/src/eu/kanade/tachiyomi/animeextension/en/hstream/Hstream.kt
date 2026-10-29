@@ -24,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import java.net.URLDecoder
@@ -109,10 +110,12 @@ abstract class Hstream :
             val id = query.removePrefix(PREFIX_SEARCH)
             val response = try {
                 client.get("$baseUrl/hentai/$id", headers)
-            } catch (e: CancellationException) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (e is eu.kanade.tachiyomi.network.HttpException && e.code == 404) {
+                    return AnimesPage(emptyList(), false)
+                }
                 throw e
-            } catch (_: Exception) {
-                return AnimesPage(emptyList(), false)
             }
             return searchAnimeByIdParse(response)
         }
@@ -195,7 +198,7 @@ abstract class Hstream :
 
     // ============================ Video Links =============================
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
-        val epResponse = client.get(baseUrl + episode.url)
+        val epResponse = client.get(baseUrl + episode.url, headers)
         val doc = epResponse.asJsoup()
 
         val token = client.cookieJar.loadForRequest(epResponse.request.url)
@@ -214,7 +217,10 @@ abstract class Hstream :
         val body = mapOf("episode_id" to episodeId).toJsonRequestBody()
         val data = client.post("$baseUrl/player/api", newHeaders, body).parseAs<PlayerApiResponse>()
 
-        val streamDomains = data.streamDomains
+        val streamDomains = data.streamDomains.filter { domain ->
+            val parsed = domain.toHttpUrlOrNull()
+            parsed != null && parsed.isHttps && isValidPublicHost(parsed.host)
+        }
         if (streamDomains.isEmpty()) return emptyList()
 
         val testBase = "${streamDomains.first()}/${data.streamUrl}"
@@ -223,15 +229,21 @@ abstract class Hstream :
         if (!forceLegacy) {
             try {
                 val testUrl = "$testBase/720/manifest.mpd"
-                val manifestString = client.get(testUrl).body.string()
+                val manifestString = client.get(testUrl, headers, ensureSuccess = false).body.string()
                 if (manifestString.contains(".html") || manifestString.contains("\\")) {
                     forceLegacy = true
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
         }
 
         val resolutions = if (forceLegacy) {
-            listOf("720")
+            listOfNotNull(
+                "720",
+                "1080",
+                if (data.resolution == "4k") "2160" else null,
+            )
         } else {
             listOfNotNull(
                 "720",
@@ -301,6 +313,13 @@ abstract class Hstream :
             entryValues = PREF_QUALITY_VALUES
             setDefaultValue(PREF_QUALITY_DEFAULT)
             summary = "%s"
+
+            setOnPreferenceChangeListener { _, newValue ->
+                val selected = newValue as String
+                val index = findIndexOfValue(selected)
+                val entry = entryValues[index] as String
+                preferences.edit().putString(key, entry).commit()
+            }
         }.also(screen::addPreference)
     }
 
@@ -326,5 +345,16 @@ abstract class Hstream :
         private const val PREF_QUALITY_DEFAULT = "720p"
         private val PREF_QUALITY_ENTRIES = arrayOf("720p (HD)", "1080p (FULLHD)", "1080@48 (1080i)", "2160p (4K)")
         private val PREF_QUALITY_VALUES = arrayOf("720p", "1080p", "1080@48", "2160p")
+
+        private fun isValidPublicHost(host: String): Boolean {
+            if (host.equals("localhost", ignoreCase = true) || host.endsWith(".local") || host.endsWith(".internal")) {
+                return false
+            }
+            return !PRIVATE_IP_REGEX.matches(host)
+        }
+
+        private val PRIVATE_IP_REGEX = Regex(
+            """^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.|169\.254\.|::1|[fF][cCdD]).*""",
+        )
     }
 }
