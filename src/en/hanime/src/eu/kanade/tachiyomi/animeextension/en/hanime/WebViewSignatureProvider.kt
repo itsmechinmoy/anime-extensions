@@ -121,7 +121,10 @@ class WebViewSignatureProvider : SignatureProvider {
                 Log.d(TAG, "getSignature: signature cached (length=${signature.signature.length})")
             }
         }
-    } ?: throw SignatureException("WebView signature extraction timed out after ${TOTAL_TIMEOUT_MS}ms")
+    } ?: run {
+        Log.w(TAG, "WebView signature extraction timed out after ${TOTAL_TIMEOUT_MS}ms, falling back to NativeSignatureProvider")
+        NativeSignatureProvider().getSignature()
+    }
 
     override fun close() {
         cachedSignature = null
@@ -352,10 +355,10 @@ class WebViewSignatureProvider : SignatureProvider {
         private const val TAG = "WebViewSigProvider"
 
         /** Maximum time to wait for the page to finish loading. */
-        private const val PAGE_LOAD_TIMEOUT_MS = 30_000L
+        private const val PAGE_LOAD_TIMEOUT_MS = 10_000L
 
         /** Maximum time to poll for the signature after the page loads. */
-        private const val SIGNATURE_POLL_TIMEOUT_MS = 15_000L
+        private const val SIGNATURE_POLL_TIMEOUT_MS = 5_000L
 
         /** Interval between signature availability checks. */
         private const val POLL_INTERVAL_MS = 500L

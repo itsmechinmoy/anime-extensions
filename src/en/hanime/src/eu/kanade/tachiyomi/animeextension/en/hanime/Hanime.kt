@@ -69,14 +69,22 @@ abstract class Hanime :
     private suspend fun ensureSignatureProvider(): SignatureProvider {
         // Fast path: check if provider exists and mode hasn't changed
         val currentProvider = signatureProvider
-        val currentMode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
+        var currentMode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
+        if (currentMode == "wasm") {
+            preferences.edit().putString(PREF_SIG_PROVIDER_KEY, "native").apply()
+            currentMode = "native"
+        }
         if (currentProvider != null && currentMode == signatureProviderMode) {
             return currentProvider
         }
 
         // Slow path: acquire lock and re-read preference inside the lock
         return signatureProviderMutex.withLock {
-            val mode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
+            var mode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
+            if (mode == "wasm") {
+                preferences.edit().putString(PREF_SIG_PROVIDER_KEY, "native").apply()
+                mode = "native"
+            }
             val lockedProvider = signatureProvider
             if (lockedProvider != null && signatureProviderMode == mode) {
                 lockedProvider
@@ -102,13 +110,13 @@ abstract class Hanime :
             if (binary != null) {
                 ChicorySignatureProvider(binary)
             } else {
-                Log.w(TAG, "WASM binary fetch failed — falling back to WebView provider")
-                WebViewSignatureProvider()
+                Log.w(TAG, "WASM binary fetch failed — falling back to NativeSignatureProvider")
+                NativeSignatureProvider()
             }
         }
         else -> {
-            Log.w(TAG, "Unknown signature provider mode '$mode', falling back to WebViewSignatureProvider")
-            WebViewSignatureProvider()
+            Log.w(TAG, "Unknown signature provider mode '$mode', falling back to NativeSignatureProvider")
+            NativeSignatureProvider()
         }
     }
 
@@ -305,13 +313,11 @@ abstract class Hanime :
             }
         }
 
-        // Deduplicate by series first so each series has equal probability when shuffled or sorted
-        val uniqueSeries = filtered.distinctBy { getTitle(it.name) }
-
-        // Apply sorting
+        // Apply sorting and series deduplication
         val sorted = if (orderBy == "random") {
+            // Deduplicate by series first so each series has equal probability when shuffled
             val seed = if (cachedSearchHitsTimestamp != 0L) cachedSearchHitsTimestamp else 1337L
-            val shuffled = uniqueSeries.shuffled(kotlin.random.Random(seed))
+            val shuffled = filtered.distinctBy { getTitle(it.name) }.shuffled(kotlin.random.Random(seed))
             if (ordering == "asc") shuffled.reversed() else shuffled
         } else {
             val comparator: Comparator<HitsModel> = when (orderBy) {
@@ -322,7 +328,8 @@ abstract class Hanime :
                 "title_sortable" -> compareByDescending { it.name.lowercase(Locale.US) }
                 else -> compareByDescending { it.likes ?: 0L }
             }
-            if (ordering == "asc") uniqueSeries.sortedWith(comparator.reversed()) else uniqueSeries.sortedWith(comparator)
+            val sortedList = if (ordering == "asc") filtered.sortedWith(comparator.reversed()) else filtered.sortedWith(comparator)
+            sortedList.distinctBy { getTitle(it.name) }
         }
 
         // Paginate
@@ -455,11 +462,6 @@ abstract class Hanime :
      * 5. Expand each playlist into playable videos via PlaylistUtils
      */
     private suspend fun fetchHandshakeVideos(slug: String): List<Video> {
-        // Warm up the video page on hanime.tv to ensure cookies / CF clearance exist
-        runCatching {
-            client.newCall(GET("$baseUrl/videos/hentai/$slug", headers)).await().close()
-        }
-
         val signature = ensureSignatureProvider().getSignature()
         val payload = buildJsonObject {
             put("timestamp_unix", signature.time.toLong())
@@ -480,46 +482,57 @@ abstract class Hanime :
         val requestBody = """{"token":"$token"}"""
             .toRequestBody("application/json".toMediaType())
 
-        return client.newCall(POST("$AUTH_BASE_URL/api/v11/handshake", requestHeaders, body = requestBody))
+        var response = client.newCall(POST("$AUTH_BASE_URL/api/v11/handshake", requestHeaders, body = requestBody))
             .await()
-            .use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "fetchHandshakeVideos() — handshake non-2xx (${response.code}) for slug '$slug'")
-                    return@use emptyList()
-                }
-                val xToken = response.header("x-token")
-                if (xToken.isNullOrEmpty()) {
-                    Log.w(TAG, "fetchHandshakeVideos() — missing x-token header for slug '$slug'")
-                    return@use emptyList()
-                }
 
-                val handshakePayload = HandshakeCipher.open(xToken).parseAs<HandshakePayload>()
-                val playerHeaders = videoHeaders()
-                handshakePayload.sources
-                    .filter { it.kind == "normal" && it.src.isNotBlank() }
-                    .parallelFlatMap { stream ->
-                        val streamUrl = resolveSourceUrl(stream.src)
-                        runCatching {
-                            playlistUtils.extractFromHls(
-                                playlistUrl = streamUrl,
-                                masterHeaders = playerHeaders,
-                                videoHeaders = playerHeaders,
-                                videoNameGen = { quality ->
-                                    if (quality == "Video") "${stream.height ?: 0}p" else quality
-                                },
-                            )
-                        }.getOrElse { e ->
-                            Log.w(TAG, "fetchHandshakeVideos() — HLS extraction failed for $streamUrl: ${e.javaClass.simpleName}: ${e.message}")
-                            listOf(
-                                Video(
-                                    videoUrl = streamUrl,
-                                    videoTitle = stream.label ?: "${stream.height ?: "?"}p",
-                                    headers = playerHeaders,
-                                ),
-                            )
-                        }
-                    }
+        // If handshake is blocked with 403, attempt a one-time video page warm-up to acquire CF clearance and retry
+        if (response.code == 403) {
+            response.close()
+            runCatching {
+                client.newCall(GET("$baseUrl/videos/hentai/$slug", headers)).await().close()
             }
+            response = client.newCall(POST("$AUTH_BASE_URL/api/v11/handshake", requestHeaders, body = requestBody))
+                .await()
+        }
+
+        return response.use { resp ->
+            if (!resp.isSuccessful) {
+                Log.w(TAG, "fetchHandshakeVideos() — handshake non-2xx (${resp.code}) for slug '$slug'")
+                return@use emptyList()
+            }
+            val xToken = resp.header("x-token")
+            if (xToken.isNullOrEmpty()) {
+                Log.w(TAG, "fetchHandshakeVideos() — missing x-token header for slug '$slug'")
+                return@use emptyList()
+            }
+
+            val handshakePayload = HandshakeCipher.open(xToken).parseAs<HandshakePayload>()
+            val playerHeaders = videoHeaders()
+            handshakePayload.sources
+                .filter { it.kind == "normal" && it.src.isNotBlank() }
+                .parallelFlatMap { stream ->
+                    val streamUrl = resolveSourceUrl(stream.src)
+                    runCatching {
+                        playlistUtils.extractFromHls(
+                            playlistUrl = streamUrl,
+                            masterHeaders = playerHeaders,
+                            videoHeaders = playerHeaders,
+                            videoNameGen = { quality ->
+                                if (quality == "Video") "${stream.height ?: 0}p" else quality
+                            },
+                        )
+                    }.getOrElse { e ->
+                        Log.w(TAG, "fetchHandshakeVideos() — HLS extraction failed for $streamUrl: ${e.javaClass.simpleName}: ${e.message}")
+                        listOf(
+                            Video(
+                                videoUrl = streamUrl,
+                                videoTitle = stream.label ?: "${stream.height ?: "?"}p",
+                                headers = playerHeaders,
+                            ),
+                        )
+                    }
+                }
+        }
     }
 
     private fun resolveSourceUrl(src: String): String = if (src.startsWith("http")) src else baseUrl.trimEnd('/') + src
