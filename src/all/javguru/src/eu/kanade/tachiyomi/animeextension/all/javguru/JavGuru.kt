@@ -348,9 +348,6 @@ abstract class JavGuru :
             ?: return null
 
         val host = redirectUrl.toHttpUrlOrNull()?.host ?: return null
-        if (!isPublicHost(host)) {
-            return null
-        }
 
         return Hoster(
             hosterUrl = redirectUrl,
@@ -380,7 +377,6 @@ abstract class JavGuru :
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val hosterUrl = hoster.hosterUrl
         val host = hosterUrl.toHttpUrlOrNull()?.host?.lowercase() ?: return emptyList()
-        if (!isPublicHost(host)) return emptyList()
 
         return when {
             listOf("javplaya", "javclan", "javlesbians", "ashleyhardat", "streamhg", "vide0").any { host.contains(it) } -> {
@@ -458,21 +454,6 @@ abstract class JavGuru :
                 it.videoTitle.contains(quality)
             },
         )
-    }
-
-    private fun isPublicHost(host: String): Boolean {
-        if (host.equals("localhost", ignoreCase = true) || host.endsWith(".local") || host.endsWith(".internal")) {
-            return false
-        }
-        val parts = host.split(".")
-        if (parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 }) {
-            val p0 = parts[0].toInt()
-            val p1 = parts[1].toInt()
-            if (p0 == 10 || p0 == 127 || p0 == 0 || (p0 == 172 && p1 in 16..31) || (p0 == 192 && p1 == 168) || (p0 == 169 && p1 == 254)) {
-                return false
-            }
-        }
-        return true
     }
 
     // ========================= Utilities =========================
