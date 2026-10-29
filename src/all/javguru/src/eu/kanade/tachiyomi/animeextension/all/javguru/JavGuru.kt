@@ -303,11 +303,14 @@ abstract class JavGuru :
     private suspend fun resolveHosterUrl(iframeUrl: String): Hoster? = runCatching {
         val httpUrl = iframeUrl.toHttpUrlOrNull()
         val queryParam = httpUrl?.queryParameterNames?.firstOrNull { it.endsWith("d") && it.length == 2 }
-        val finalUrl = if (queryParam != null) {
-            val token = httpUrl.queryParameter(queryParam)!!
-            val base = iframeUrl.substringBefore("?")
-            val rtype = queryParam[0] + "r"
-            "$base?$rtype=${token.reversed()}"
+        val finalUrl = if (httpUrl != null && queryParam != null) {
+            val token = httpUrl.queryParameter(queryParam) ?: return null
+            val rtype = "${queryParam[0]}r"
+            httpUrl.newBuilder()
+                .removeAllQueryParameters(queryParam)
+                .addQueryParameter(rtype, token.reversed())
+                .build()
+                .toString()
         } else {
             val iframeDocument = client.newCall(GET(iframeUrl, headers))
                 .awaitSuccess().useAsJsoup()
@@ -328,7 +331,12 @@ abstract class JavGuru :
             }
             val fullToken = tokenBuilder.toString()
             if (fullToken.isBlank()) return null
-            "$base?$rtype" + "r=${fullToken.reversed()}"
+            base.toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("${rtype}r", fullToken.reversed())
+                ?.build()
+                ?.toString()
+                ?: "$base?${rtype}r=${fullToken.reversed()}"
         }
 
         val newHeaders = headersBuilder()
@@ -339,13 +347,14 @@ abstract class JavGuru :
             .await().use { it.header("location") }
             ?: return null
 
-        if (redirectUrl.toHttpUrlOrNull() == null) {
+        val host = redirectUrl.toHttpUrlOrNull()?.host ?: return null
+        if (!isPublicHost(host)) {
             return null
         }
 
         return Hoster(
             hosterUrl = redirectUrl,
-            hosterName = redirectUrl.toHttpUrlOrNull()?.host ?: "Unknown",
+            hosterName = host,
         )
     }.getOrNull()
 
@@ -370,45 +379,66 @@ abstract class JavGuru :
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val hosterUrl = hoster.hosterUrl
+        val host = hosterUrl.toHttpUrlOrNull()?.host?.lowercase() ?: return emptyList()
+        if (!isPublicHost(host)) return emptyList()
+
         return when {
-            listOf("javplaya", "javclan", "javlesbians", "ashleyhardat", "streamhg", "vide0").any { it in hosterUrl } -> {
-                vidHideExtractor.videosFromUrl(hosterUrl) { quality ->
-                    "JavClan - $quality"
-                }.ifEmpty {
-                    streamWishExtractor.videosFromUrl(hosterUrl).map { video ->
-                        val newHeaders = (video.headers ?: headers).newBuilder()
-                            .set("Referer", "$baseUrl/")
-                            .set("Origin", baseUrl)
-                            .build()
-                        video.copy(
-                            headers = newHeaders,
-                        )
+            listOf("javplaya", "javclan", "javlesbians", "ashleyhardat", "streamhg", "vide0").any { host.contains(it) } -> {
+                val videos = runCatching {
+                    vidHideExtractor.videosFromUrl(hosterUrl) { quality ->
+                        "JavClan - $quality"
                     }
+                }.getOrDefault(emptyList())
+
+                videos.ifEmpty {
+                    runCatching {
+                        streamWishExtractor.videosFromUrl(hosterUrl).map { video ->
+                            val newHeaders = (video.headers ?: headers).newBuilder()
+                                .set("Referer", "$baseUrl/")
+                                .set("Origin", baseUrl)
+                                .build()
+                            video.copy(
+                                headers = newHeaders,
+                            )
+                        }
+                    }.getOrDefault(emptyList())
                 }
             }
 
-            listOf("streamhihi", "lulustream").any { it in hosterUrl } -> {
-                LuluExtractor(client, headers).videosFromUrl(hosterUrl, "")
+            listOf("streamhihi", "lulustream").any { host.contains(it) } -> {
+                runCatching {
+                    LuluExtractor(client, headers).videosFromUrl(hosterUrl, "")
+                }.getOrDefault(emptyList())
             }
 
-            hosterUrl.contains("streamtape") -> {
-                streamTapeExtractor.videoFromUrl(hosterUrl).let(::listOfNotNull)
+            host.contains("streamtape") -> {
+                runCatching {
+                    streamTapeExtractor.videoFromUrl(hosterUrl).let(::listOfNotNull)
+                }.getOrDefault(emptyList())
             }
 
-            listOf("dood", "ds2play").any { it in hosterUrl } -> {
-                doodExtractor.videosFromUrl(hosterUrl)
+            listOf("dood", "ds2play").any { host.contains(it) } -> {
+                runCatching {
+                    doodExtractor.videosFromUrl(hosterUrl)
+                }.getOrDefault(emptyList())
             }
 
-            listOf("mixdrop", "mixdroop").any { it in hosterUrl } -> {
-                mixDropExtractor.videoFromUrl(hosterUrl)
+            listOf("mixdrop", "mixdroop").any { host.contains(it) } -> {
+                runCatching {
+                    mixDropExtractor.videoFromUrl(hosterUrl)
+                }.getOrDefault(emptyList())
             }
 
-            hosterUrl.contains("maxstream") -> {
-                maxStreamExtractor.videoFromUrl(hosterUrl)
+            host.contains("maxstream") -> {
+                runCatching {
+                    maxStreamExtractor.videoFromUrl(hosterUrl)
+                }.getOrDefault(emptyList())
             }
 
-            hosterUrl.contains("emturbovid") -> {
-                emTurboExtractor.getVideos(hosterUrl)
+            host.contains("emturbovid") -> {
+                runCatching {
+                    emTurboExtractor.getVideos(hosterUrl)
+                }.getOrDefault(emptyList())
             }
 
             else -> emptyList()
@@ -424,13 +454,28 @@ abstract class JavGuru :
 
         return sortedWith(
             compareByDescending<Video> {
-                listOf("javplaya", "javclan", "streamwish", "wishembed", "ashleyhardat").any { host ->
-                    it.videoUrl.contains(host)
+                listOf("javclan", "javplaya", "streamwish", "wishembed", "ashleyhardat").any { host ->
+                    it.videoTitle.contains(host, ignoreCase = true) || it.videoUrl.contains(host, ignoreCase = true)
                 }
             }.thenByDescending {
                 it.videoTitle.contains(quality)
             },
         )
+    }
+
+    private fun isPublicHost(host: String): Boolean {
+        if (host.equals("localhost", ignoreCase = true) || host.endsWith(".local") || host.endsWith(".internal")) {
+            return false
+        }
+        val parts = host.split(".")
+        if (parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 }) {
+            val p0 = parts[0].toInt()
+            val p1 = parts[1].toInt()
+            if (p0 == 10 || p0 == 127 || p0 == 0 || (p0 == 172 && p1 in 16..31) || (p0 == 192 && p1 == 168) || (p0 == 169 && p1 == 254)) {
+                return false
+            }
+        }
+        return true
     }
 
     // ========================= Utilities =========================
