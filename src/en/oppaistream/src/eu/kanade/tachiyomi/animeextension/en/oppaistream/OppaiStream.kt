@@ -148,7 +148,7 @@ abstract class OppaiStream :
 
         val useAnilistCover = preferences.getBoolean(PREF_ANILIST_COVER_KEY, PREF_ANILIST_COVER_DEFAULT)
         if (useAnilistCover && details.title.isNotBlank()) {
-            val cleanTitle = details.title.replace(Regex("[^a-zA-Z0-9\\s!.:]"), " ").trim()
+            val cleanTitle = details.title.replace(TITLE_SANITIZE_REGEX, " ").trim()
             try {
                 val anilistCover = fetchThumbnailUrlByTitle(cleanTitle)
                 if (anilistCover != null) {
@@ -205,7 +205,7 @@ abstract class OppaiStream :
 
             val matched = episodeElements
                 .filter {
-                    val epTitle = it.selectFirst("p.episode-title")?.text()?.trim().orEmpty()
+                    val epTitle = it.selectFirst("p.episode-title")?.text().orEmpty()
                     epTitle.equals(anime.title.trim(), ignoreCase = true)
                 }
                 .map { element ->
@@ -389,6 +389,7 @@ abstract class OppaiStream :
         private const val SEARCH_PATH = "api/search.php"
         private const val SEARCH_LIMIT = 36
         private val TITLE_CLEANUP_REGEX = Regex("""\s+\d+$""")
+        private val TITLE_SANITIZE_REGEX = Regex("[^a-zA-Z0-9\\s!.:]")
 
         private val FOLDER_REGEX = Regex("""var\s+folder\s*=\s*["']([^"']+)["']""")
         private val STORAGE_BASE_REGEX = Regex("""var\s+storageBase\s*=\s*["']([^"']+)["']""")
