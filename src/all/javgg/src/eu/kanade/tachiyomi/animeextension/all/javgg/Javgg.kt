@@ -18,17 +18,16 @@ import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -46,11 +45,6 @@ abstract class Javgg :
     override val supportsRelatedAnimes = false
 
     private val preferences by getPreferencesLazy()
-
-    private val json = Json {
-        isLenient = true
-        ignoreUnknownKeys = true
-    }
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
@@ -167,9 +161,7 @@ abstract class Javgg :
     }
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
-        val document = client.newCall(GET(baseUrl + episode.url, headers))
-            .awaitSuccess()
-            .useAsJsoup()
+        val document = client.get(baseUrl + episode.url, headers).useAsJsoup()
 
         val hosters = mutableListOf<Hoster>()
 
@@ -188,9 +180,9 @@ abstract class Javgg :
                 else -> rawEmbedUrl
             }
 
-            val part = option.selectFirst(".title")?.text()?.trim().orEmpty()
+            val part = option.selectFirst(".title")?.text().orEmpty()
             val serverAttr = option.selectFirst(".server")?.attr("data-text")?.trim().orEmpty()
-            val serverText = option.selectFirst(".server")?.text()?.trim().orEmpty()
+            val serverText = option.selectFirst(".server")?.text().orEmpty()
             val rawServer = serverAttr.ifEmpty { serverText }
 
             if (rawServer.equals("f4scom", true) || embedUrl.contains("f4jav") || embedUrl.contains("f4stream")) {
@@ -331,9 +323,8 @@ abstract class Javgg :
                 .build()
 
             try {
-                val data = client.newCall(POST("https://$host/api/stream", apiHeaders, body))
-                    .awaitSuccess()
-                    .parseAs<VidaraResponse>(json)
+                val data = client.post("https://$host/api/stream", apiHeaders, body)
+                    .parseAs<VidaraResponse>()
 
                 if (!data.streamingUrl.isNullOrBlank()) {
                     streamUrl = data.streamingUrl
@@ -365,7 +356,7 @@ abstract class Javgg :
     }
 
     private suspend fun extractTurboPlay(url: String): List<Video> {
-        val turboDocument = client.newCall(GET(url, headers)).awaitSuccess().useAsJsoup()
+        val turboDocument = client.get(url, headers).useAsJsoup()
         val masterUrl = turboDocument.select("#video_player").attr("data-hash")
         if (masterUrl.isBlank()) return emptyList()
         val host = turboDocument.location().toHttpUrl().host
