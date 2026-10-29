@@ -132,7 +132,7 @@ abstract class HahoMoe :
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val document = client.get(baseUrl + episode.url, headers).asJsoup()
         val iframe = document.selectFirst("iframe")?.absUrl("src") ?: return emptyList()
-        if (!isValidHost(iframe)) return emptyList()
+        if (!isValidSourceHost(iframe)) return emptyList()
 
         val iframeHeaders = headersBuilder().set("Referer", baseUrl + episode.url).build()
         val iframeResponse = client.get(iframe, iframeHeaders).asJsoup()
@@ -219,6 +219,7 @@ abstract class HahoMoe :
 
         private fun isValidSourceHost(url: String): Boolean {
             val parsed = url.toHttpUrlOrNull() ?: return false
+            if (!parsed.isHttps) return false
             val host = parsed.host
             return host == "haho.moe" || host.endsWith(".haho.moe")
         }
