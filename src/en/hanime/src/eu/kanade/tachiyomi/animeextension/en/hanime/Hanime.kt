@@ -7,14 +7,16 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.await
 import keiyoushi.annotation.Source
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelFlatMap
@@ -33,7 +35,7 @@ import java.util.Locale
 
 @Source
 abstract class Hanime :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val supportsLatest = true
@@ -306,15 +308,21 @@ abstract class Hanime :
         }
 
         // Apply sorting
-        val comparator: Comparator<HitsModel> = when (orderBy) {
-            "views" -> compareByDescending { it.views ?: 0L }
-            "likes" -> compareByDescending { it.likes ?: 0L }
-            "created_at_unix", "published_at_unix" -> compareByDescending { it.createdAtUnix ?: 0L }
-            "released_at_unix" -> compareByDescending { it.releasedAtUnix ?: 0L }
-            "title_sortable" -> compareByDescending { it.name.lowercase(Locale.US) }
-            else -> compareByDescending { it.likes ?: 0L }
+        val sorted = if (orderBy == "random") {
+            val hourlySeed = System.currentTimeMillis() / (60 * 60 * 1000L)
+            val shuffled = filtered.shuffled(kotlin.random.Random(hourlySeed))
+            if (ordering == "asc") shuffled.reversed() else shuffled
+        } else {
+            val comparator: Comparator<HitsModel> = when (orderBy) {
+                "views" -> compareByDescending { it.views ?: 0L }
+                "likes" -> compareByDescending { it.likes ?: 0L }
+                "created_at_unix", "published_at_unix" -> compareByDescending { it.createdAtUnix ?: 0L }
+                "released_at_unix" -> compareByDescending { it.releasedAtUnix ?: 0L }
+                "title_sortable" -> compareByDescending { it.name.lowercase(Locale.US) }
+                else -> compareByDescending { it.likes ?: 0L }
+            }
+            if (ordering == "asc") filtered.sortedWith(comparator.reversed()) else filtered.sortedWith(comparator)
         }
-        val sorted = if (ordering == "asc") filtered.sortedWith(comparator.reversed()) else filtered.sortedWith(comparator)
 
         // Deduplicate by series BEFORE slicing so each series appears only once across pages
         val uniqueSeries = sorted.distinctBy { getTitle(it.name) }
@@ -418,12 +426,19 @@ abstract class Hanime :
         }
     }
 
-    // ── Video List ─────────────────────────────────────────────────────
+    // ── Video & Hoster List ───────────────────────────────────────────
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val slug = extractSlugFromUrl(episode.url)
-        return fetchHandshakeVideos(slug)
+        val videos = fetchHandshakeVideos(slug)
+        return videos.toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
     /**
      * Fetch video streams via POST /api/v11/handshake on auth.hanime.tv.
@@ -490,7 +505,13 @@ abstract class Hanime :
                             )
                         }.getOrElse { e ->
                             Log.w(TAG, "fetchHandshakeVideos() — HLS extraction failed for $streamUrl: ${e.javaClass.simpleName}: ${e.message}")
-                            listOf(Video(streamUrl, stream.label ?: "${stream.height ?: "?"}p", streamUrl, headers = playerHeaders))
+                            listOf(
+                                Video(
+                                    videoUrl = streamUrl,
+                                    videoTitle = stream.label ?: "${stream.height ?: "?"}p",
+                                    headers = playerHeaders,
+                                ),
+                            )
                         }
                     }
             }
@@ -861,6 +882,7 @@ abstract class Hanime :
         Pair("Likes", "likes"),
         Pair("Release", "released_at_unix"),
         Pair("Alphabetical", "title_sortable"),
+        Pair("Random", "random"),
     )
 
     class SortFilter(sortables: Array<String>) : AnimeFilter.Sort("Sort", sortables, Selection(2, false))
