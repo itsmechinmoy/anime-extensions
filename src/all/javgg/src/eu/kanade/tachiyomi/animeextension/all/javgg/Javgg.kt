@@ -25,6 +25,7 @@ import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -178,8 +179,14 @@ abstract class Javgg :
 
             val sourceBox = document.selectFirst("#source-player-$numOpt") ?: return@forEach
             val iframe = sourceBox.selectFirst("iframe") ?: return@forEach
-            val embedUrl = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
-            if (embedUrl.isBlank()) return@forEach
+            val rawEmbedUrl = iframe.attr("src").ifEmpty { iframe.attr("data-src") }.trim()
+            if (rawEmbedUrl.isBlank()) return@forEach
+            val embedUrl = when {
+                rawEmbedUrl.startsWith("//") -> "https:$rawEmbedUrl"
+                rawEmbedUrl.startsWith("/") -> baseUrl.trimEnd('/') + rawEmbedUrl
+                !rawEmbedUrl.startsWith("http") -> "https://$rawEmbedUrl"
+                else -> rawEmbedUrl
+            }
 
             val part = option.selectFirst(".title")?.text()?.trim().orEmpty()
             val serverAttr = option.selectFirst(".server")?.attr("data-text")?.trim().orEmpty()
@@ -225,7 +232,13 @@ abstract class Javgg :
     }
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val url = hoster.hosterUrl
+        val rawUrl = hoster.hosterUrl.trim()
+        val url = when {
+            rawUrl.startsWith("//") -> "https:$rawUrl"
+            rawUrl.startsWith("/") -> baseUrl.trimEnd('/') + rawUrl
+            !rawUrl.startsWith("http") -> "https://$rawUrl"
+            else -> rawUrl
+        }
         val nameLower = hoster.hosterName.lowercase()
         val part = if (nameLower.contains("part")) {
             hoster.hosterName.substringAfter("-").trim()
@@ -294,7 +307,13 @@ abstract class Javgg :
 
     private suspend fun extractVidara(url: String, prefix: String): List<Video> {
         val httpUrl = url.toHttpUrlOrNull() ?: return emptyList()
-        val filecode = httpUrl.pathSegments.lastOrNull { it.isNotBlank() } ?: return emptyList()
+        val path = httpUrl.encodedPath
+        val filecode = when {
+            "/e/" in path -> path.substringAfter("/e/").substringBefore("/")
+            "/v/" in path -> path.substringAfter("/v/").substringBefore("/")
+            else -> httpUrl.pathSegments.lastOrNull { it.isNotBlank() }
+        } ?: return emptyList()
+        if (filecode.isBlank()) return emptyList()
 
         val embedHost = httpUrl.host
         val body = """{"filecode":"$filecode","device":"web"}"""
@@ -328,6 +347,8 @@ abstract class Javgg :
                     }.orEmpty()
                     break
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 continue
             }
