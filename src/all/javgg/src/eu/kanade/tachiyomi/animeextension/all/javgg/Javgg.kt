@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
@@ -22,11 +23,13 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -190,12 +193,15 @@ abstract class Javgg :
             val serverName = when {
                 embedUrl.contains("vidara") || rawServer.contains("vidara", true) -> "Vidara"
                 embedUrl.contains("earnvid") || embedUrl.contains("vidhide") || rawServer.contains("vidhide", true) -> "VidHide"
-                embedUrl.contains("streamhg") -> "StreamHG"
-                embedUrl.contains("streamwish") || rawServer.contains("streamwish", true) -> "StreamWish"
+                embedUrl.contains("streamhg") || rawServer.contains("streamhg", true) -> "StreamHG"
+                embedUrl.contains("streamwish") || embedUrl.contains("wishembed") || embedUrl.contains("strwish") ||
+                    embedUrl.contains("wishfast") || embedUrl.contains("dwish") ||
+                    rawServer.contains("streamwish", true) || rawServer.contains("wish", true) -> "StreamWish"
+                embedUrl.contains("filelions") || embedUrl.contains("fviplions") ||
+                    rawServer.contains("filelions", true) || rawServer.contains("lion", true) -> "FileLions"
                 embedUrl.contains("voe") || rawServer.contains("voe", true) -> "Voe"
                 embedUrl.contains("ok.ru") || rawServer.contains("okru", true) -> "Okru"
                 embedUrl.contains("yourupload") || rawServer.contains("yourupload", true) -> "YourUpload"
-                embedUrl.contains("filelions") || rawServer.contains("filelions", true) -> "FileLions"
                 embedUrl.contains("turboplay") || rawServer.contains("turboplay", true) -> "TurboPlay"
                 rawServer.isNotBlank() -> rawServer.replaceFirstChar { it.uppercase() }
                 else -> "Server"
@@ -241,7 +247,7 @@ abstract class Javgg :
                 }
             }
 
-            url.contains("streamhg") -> {
+            url.contains("streamhg") || nameLower.contains("streamhg") -> {
                 val extHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
                 VidHideExtractor(client, extHeaders).videosFromUrl(url) { quality ->
                     "${prefix}StreamHG - $quality"
@@ -249,17 +255,18 @@ abstract class Javgg :
             }
 
             url.contains("streamwish") || url.contains("wishembed") || url.contains("strwish") ||
-                nameLower.contains("streamwish") -> {
+                url.contains("wishfast") || url.contains("dwish") || nameLower.contains("streamwish") -> {
+                val host = url.toHttpUrlOrNull()?.host ?: "streamwish.to"
                 val docHeaders = headers.newBuilder()
-                    .set("Origin", "https://${url.toHttpUrl().host}")
-                    .set("Referer", "https://${url.toHttpUrl().host}/")
+                    .set("Origin", "https://$host")
+                    .set("Referer", "https://$host/")
                     .build()
                 StreamWishExtractor(client, docHeaders).videosFromUrl(url) { quality ->
                     "${prefix}StreamWish - $quality"
                 }
             }
 
-            url.contains("filelions") || nameLower.contains("filelions") -> {
+            url.contains("filelions") || url.contains("fviplions") || nameLower.contains("filelions") -> {
                 StreamWishExtractor(client, headers).videosFromUrl(url) { quality ->
                     "${prefix}FileLions - $quality"
                 }
@@ -286,26 +293,53 @@ abstract class Javgg :
     }
 
     private suspend fun extractVidara(url: String, prefix: String): List<Video> {
-        val filecode = url.substringAfterLast("/e/").substringBefore("?").substringBefore("/")
-        if (filecode.isBlank()) return emptyList()
+        val httpUrl = url.toHttpUrlOrNull() ?: return emptyList()
+        val filecode = httpUrl.pathSegments.lastOrNull { it.isNotBlank() } ?: return emptyList()
 
-        val host = url.toHttpUrl().host
+        val embedHost = httpUrl.host
         val body = """{"filecode":"$filecode","device":"web"}"""
             .toRequestBody("application/json".toMediaType())
-        val apiHeaders = headers.newBuilder()
-            .set("Referer", url)
-            .set("Origin", "https://$host")
-            .build()
 
-        val response = client.newCall(POST("https://$host/api/stream", apiHeaders, body))
-            .awaitSuccess()
-        val data = json.decodeFromString<VidaraResponse>(response.body.string())
-        val streamUrl = data.streamingUrl ?: return emptyList()
+        val hostsToTry = listOfNotNull(embedHost, "vidara.so", "gasobni.com").distinct()
+        var streamUrl: String? = null
+        var subTracks: List<Track> = emptyList()
+        var successHost: String = embedHost
+
+        for (host in hostsToTry) {
+            val apiHeaders = headers.newBuilder()
+                .set("Referer", url)
+                .set("Origin", "https://$host")
+                .build()
+
+            try {
+                val data = client.newCall(POST("https://$host/api/stream", apiHeaders, body))
+                    .awaitSuccess()
+                    .parseAs<VidaraResponse>(json)
+
+                if (!data.streamingUrl.isNullOrBlank()) {
+                    streamUrl = data.streamingUrl
+                    successHost = host
+                    subTracks = data.subtitles?.mapNotNull { sub ->
+                        if (sub.filePath.isNotBlank()) {
+                            Track(sub.filePath, sub.language ?: "Subtitle")
+                        } else {
+                            null
+                        }
+                    }.orEmpty()
+                    break
+                }
+            } catch (_: Exception) {
+                continue
+            }
+        }
+
+        if (streamUrl.isNullOrBlank()) return emptyList()
 
         return playlistUtils.extractFromHls(
             playlistUrl = streamUrl,
-            referer = "https://$host/",
+            referer = "https://$successHost/",
             videoNameGen = { quality -> "${prefix}Vidara - $quality" },
+            subtitleList = subTracks,
         )
     }
 
@@ -333,7 +367,8 @@ abstract class Javgg :
     override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     override fun List<Hoster>.sortHosters(): List<Hoster> {
-        val server = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT)!!
+        val rawServer = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT)!!
+        val server = if (rawServer.equals("StreamHideVid", ignoreCase = true)) "VidHide" else rawServer
         return sortedWith(
             compareBy { it.hosterName.contains(server, true) },
         ).reversed()
@@ -360,7 +395,8 @@ abstract class Javgg :
 
     override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
-        val server = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT)!!
+        val rawServer = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT)!!
+        val server = if (rawServer.equals("StreamHideVid", ignoreCase = true)) "VidHide" else rawServer
         return this.sortedWith(
             compareBy(
                 { it.videoTitle.contains(server, true) },
@@ -371,6 +407,10 @@ abstract class Javgg :
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        if (preferences.getString(PREF_SERVER_KEY, null) == "StreamHideVid") {
+            preferences.edit().putString(PREF_SERVER_KEY, "VidHide").apply()
+        }
+
         ListPreference(screen.context).apply {
             key = PREF_SERVER_KEY
             title = "Preferred server"
@@ -408,5 +448,13 @@ abstract class Javgg :
     private data class VidaraResponse(
         @SerialName("streaming_url")
         val streamingUrl: String? = null,
+        val subtitles: List<VidaraSubtitle>? = null,
+    )
+
+    @Serializable
+    private data class VidaraSubtitle(
+        @SerialName("file_path")
+        val filePath: String = "",
+        val language: String? = null,
     )
 }
