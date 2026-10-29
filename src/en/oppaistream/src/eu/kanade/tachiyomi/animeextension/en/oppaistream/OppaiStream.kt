@@ -63,7 +63,7 @@ abstract class OppaiStream :
             .add("tags", "")
             .add("blacklist", "")
             .add("studios", "")
-            .add("order", "recent")
+            .add("order", "uploaded")
             .add("page", page.toString())
             .add("limit", SEARCH_LIMIT.toString())
             .build()
@@ -122,7 +122,7 @@ abstract class OppaiStream :
     override fun searchAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
         val elements = document.select("a.episode")
-        val anime = elements.map(::searchAnimeFromElement).distinctBy { it.title }
+        val anime = elements.map(::searchAnimeFromElement).distinctBy { it.url }
         val hasNextPage = elements.size >= SEARCH_LIMIT
         return AnimesPage(anime, hasNextPage)
     }
@@ -141,7 +141,10 @@ abstract class OppaiStream :
     // =========================== Anime Details ============================
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
         val response = client.get(baseUrl + anime.url, headers)
-        val details = animeDetailsParse(response)
+        val details = animeDetailsParse(response).apply {
+            url = anime.url
+            initialized = true
+        }
 
         val useAnilistCover = preferences.getBoolean(PREF_ANILIST_COVER_KEY, PREF_ANILIST_COVER_DEFAULT)
         if (useAnilistCover && details.title.isNotBlank()) {
@@ -151,7 +154,9 @@ abstract class OppaiStream :
                 if (anilistCover != null) {
                     val studios = details.artist.orEmpty().split(", ")
                     val matchedStudio = anilistCover.second.find { it in studios }
-                    details.thumbnail_url = matchedStudio?.let { anilistCover.first } ?: anilistCover.first
+                    if (matchedStudio != null) {
+                        details.thumbnail_url = anilistCover.first
+                    }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -161,6 +166,7 @@ abstract class OppaiStream :
     }
 
     override fun animeDetailsParse(response: Response) = SAnime.create().apply {
+        setUrlWithoutDomain(response.request.url.toString())
         val document = response.asJsoup()
         val name = document.selectFirst("#episode-title")?.text()?.substringBefore(" Episode")
             ?: document.selectFirst("h1")?.text()?.substringBefore(" Episode")
@@ -180,36 +186,45 @@ abstract class OppaiStream :
 
     // ============================== Episodes ==============================
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val formBody = FormBody.Builder()
-            .add("text", anime.title)
-            .add("tags", "")
-            .add("blacklist", "")
-            .add("studios", "")
-            .add("order", "az")
-            .add("page", "1")
-            .add("limit", "100")
-            .build()
-        val searchResponse = client.post("$baseUrl/$SEARCH_PATH", headers, formBody).asJsoup()
-        val episodeElements = searchResponse.select("a.episode")
+        val episodes = mutableListOf<SEpisode>()
+        var page = 1
 
-        val episodes = episodeElements
-            .filter {
-                val epTitle = it.selectFirst("p.episode-title")?.text().orEmpty()
-                epTitle.equals(anime.title, ignoreCase = true) || epTitle.startsWith(anime.title, ignoreCase = true)
-            }
-            .map { element ->
-                SEpisode.create().apply {
-                    setUrlWithoutDomain(element.absUrl("href"))
-                    val num = element.selectFirst("p.episode-number")?.text()
-                        ?: element.attr("epid").ifBlank { "1" }
-                    name = "Episode $num"
-                    episode_number = num.toFloatOrNull() ?: 1F
+        while (true) {
+            val formBody = FormBody.Builder()
+                .add("text", anime.title)
+                .add("tags", "")
+                .add("blacklist", "")
+                .add("studios", "")
+                .add("order", "az")
+                .add("page", page.toString())
+                .add("limit", "100")
+                .build()
+            val searchResponse = client.post("$baseUrl/$SEARCH_PATH", headers, formBody).asJsoup()
+            val episodeElements = searchResponse.select("a.episode")
+            if (episodeElements.isEmpty()) break
+
+            val matched = episodeElements
+                .filter {
+                    val epTitle = it.selectFirst("p.episode-title")?.text()?.trim().orEmpty()
+                    epTitle.equals(anime.title.trim(), ignoreCase = true)
                 }
-            }
-            .sortedByDescending { it.episode_number }
+                .map { element ->
+                    SEpisode.create().apply {
+                        setUrlWithoutDomain(element.absUrl("href"))
+                        val num = element.selectFirst("p.episode-number")?.text()
+                            ?: element.attr("epid").ifBlank { "1" }
+                        name = "Episode $num"
+                        episode_number = num.toFloatOrNull() ?: 1F
+                    }
+                }
+            episodes.addAll(matched)
+
+            if (episodeElements.size < 100) break
+            page++
+        }
 
         if (episodes.isNotEmpty()) {
-            return episodes
+            return episodes.sortedByDescending { it.episode_number }
         }
 
         return listOf(
@@ -226,8 +241,10 @@ abstract class OppaiStream :
     // ============================ Video Links =============================
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val doc = client.get(baseUrl + episode.url, headers).asJsoup()
-        val script = doc.selectFirst("script:containsData(var folder)")?.data() ?: return emptyList()
-        val folder = FOLDER_REGEX.find(script)?.groupValues?.get(1) ?: return emptyList()
+        val script = doc.selectFirst("script:containsData(var folder)")?.data()
+            ?: throw Exception("Could not find player configuration script")
+        val folder = FOLDER_REGEX.find(script)?.groupValues?.get(1)
+            ?: throw Exception("Could not extract stream folder name")
         val storageBase = STORAGE_BASE_REGEX.find(script)?.groupValues?.get(1)?.replace("\\/", "/")
             ?: "https://oppai.stream/videos"
         val res = RES_REGEX.find(script)?.groupValues?.get(1) ?: "720-1"
@@ -245,7 +262,7 @@ abstract class OppaiStream :
             res.startsWith("720") -> "720p"
             else -> "720p"
         }
-        val videoHeaders = headersBuilder().set("Referer", baseUrl + episode.url).build()
+        val videoHeaders = headersBuilder().set("Referer", "$baseUrl/").build()
 
         val videos = listOf(
             Video(
