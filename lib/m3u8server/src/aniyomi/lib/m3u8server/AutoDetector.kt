@@ -43,6 +43,28 @@ object AutoDetector {
      * fMP4) can only carry a leading disguise block, which is located with
      * [detectLeadingDisguise].
      */
+    @Deprecated("Replaced by detectInterleavedSkips")
+    fun detectSkipBytes(data: ByteArray): Int {
+        val first = detectInterleavedSkips(data).firstOrNull() ?: return 0
+        return if (first.first == 0) first.last + 1 else 0
+    }
+
+    /**
+     * Returns the sorted, non-overlapping byte ranges (inclusive `[start, end]`)
+     * of junk that must be stripped from a segment before it is served.
+     *
+     * MPEG-TS is a strict grid of 188-byte packets, so junk injected by an
+     * obfuscator (a fake image header at the start, or further disguise blocks
+     * between packets) always shows up as a gap in that grid. The detector
+     * walks the grid and strips only the bytes between a packet and the next
+     * verified packet grid, so packet payload is never inspected or altered;
+     * magic bytes such as `FF D8 FF` occur by chance inside compressed audio
+     * and video, and matching on them corrupts valid streams.
+     *
+     * Buffers that do not start a TS grid within [SYNC_SEARCH_LIMIT] (MP4, AVI,
+     * fMP4) can only carry a leading disguise block, which is located with
+     * [detectLeadingDisguise].
+     */
     fun detectInterleavedSkips(data: ByteArray): List<IntRange> {
         if (data.isEmpty()) return emptyList()
 
@@ -53,7 +75,7 @@ object AutoDetector {
         }
 
         val regions = mutableListOf<IntRange>()
-        if (tsStart > 0) regions.add(0 until tsStart)
+        if (tsStart > 0 && hasImageMagicAt(data, 0)) regions.add(0 until tsStart)
 
         var pos = tsStart
         while (pos < data.size) {
