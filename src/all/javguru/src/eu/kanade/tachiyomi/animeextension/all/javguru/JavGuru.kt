@@ -5,9 +5,11 @@ import androidx.preference.PreferenceScreen
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.javcoverfetcher.JavCoverFetcher
 import aniyomi.lib.javcoverfetcher.JavCoverFetcher.fetchHDCovers
+import aniyomi.lib.luluextractor.LuluExtractor
 import aniyomi.lib.mixdropextractor.MixDropExtractor
 import aniyomi.lib.streamtapeextractor.StreamTapeExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
+import aniyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.animeextension.all.javguru.extractors.EmTurboExtractor
 import eu.kanade.tachiyomi.animeextension.all.javguru.extractors.MaxStreamExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -299,10 +301,13 @@ abstract class JavGuru :
     }
 
     private suspend fun resolveHosterUrl(iframeUrl: String): Hoster? = runCatching {
-        val token = iframeUrl.toHttpUrlOrNull()?.queryParameter("xd")
-        val finalUrl = if (token != null) {
+        val httpUrl = iframeUrl.toHttpUrlOrNull()
+        val queryParam = httpUrl?.queryParameterNames?.firstOrNull { it.endsWith("d") && it.length == 2 }
+        val finalUrl = if (queryParam != null) {
+            val token = httpUrl.queryParameter(queryParam)!!
             val base = iframeUrl.substringBefore("?")
-            "$base?xr=${token.reversed()}"
+            val rtype = queryParam[0] + "r"
+            "$base?$rtype=${token.reversed()}"
         } else {
             val iframeDocument = client.newCall(GET(iframeUrl, headers))
                 .awaitSuccess().useAsJsoup()
@@ -351,6 +356,12 @@ abstract class JavGuru :
 
         StreamWishExtractor(client, swHeaders)
     }
+    private val vidHideExtractor by lazy {
+        val jcHeaders = headersBuilder()
+            .set("Referer", "$baseUrl/")
+            .build()
+        VidHideExtractor(client, jcHeaders)
+    }
     private val streamTapeExtractor by lazy { StreamTapeExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val mixDropExtractor by lazy { MixDropExtractor(client) }
@@ -360,16 +371,24 @@ abstract class JavGuru :
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val hosterUrl = hoster.hosterUrl
         return when {
-            listOf("javplaya", "javclan").any { it in hosterUrl } -> {
-                streamWishExtractor.videosFromUrl(hosterUrl).map { video ->
-                    val newHeaders = (video.headers ?: headers).newBuilder()
-                        .set("Referer", "$baseUrl/")
-                        .set("Origin", baseUrl)
-                        .build()
-                    video.copy(
-                        headers = newHeaders,
-                    )
+            listOf("javplaya", "javclan", "javlesbians", "ashleyhardat", "streamhg", "vide0").any { it in hosterUrl } -> {
+                vidHideExtractor.videosFromUrl(hosterUrl) { quality ->
+                    "JavClan - $quality"
+                }.ifEmpty {
+                    streamWishExtractor.videosFromUrl(hosterUrl).map { video ->
+                        val newHeaders = (video.headers ?: headers).newBuilder()
+                            .set("Referer", "$baseUrl/")
+                            .set("Origin", baseUrl)
+                            .build()
+                        video.copy(
+                            headers = newHeaders,
+                        )
+                    }
                 }
+            }
+
+            listOf("streamhihi", "lulustream").any { it in hosterUrl } -> {
+                LuluExtractor(client, headers).videosFromUrl(hosterUrl, "")
             }
 
             hosterUrl.contains("streamtape") -> {
@@ -396,15 +415,18 @@ abstract class JavGuru :
         }
     }
 
+    override fun List<Hoster>.sortHosters(): List<Hoster> = sortedWith(
+        compareByDescending { listOf("javclan", "javplaya", "javlesbians", "ashleyhardat").any { s -> it.hosterName.contains(s, true) } },
+    )
+
     override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY, PREF_QUALITY_DEFAULT)!!
 
         return sortedWith(
-            compareBy<Video> {
-                val isJavClan = listOf("javplaya", "javclan", "streamwish", "wishembed").any { host ->
+            compareByDescending<Video> {
+                listOf("javplaya", "javclan", "streamwish", "wishembed", "ashleyhardat").any { host ->
                     it.videoUrl.contains(host)
                 }
-                if (isJavClan) 1 else 0
             }.thenByDescending {
                 it.videoTitle.contains(quality)
             },
