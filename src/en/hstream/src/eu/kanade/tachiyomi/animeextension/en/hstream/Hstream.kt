@@ -27,6 +27,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -45,7 +46,7 @@ abstract class Hstream :
 
     private fun popularAnimeSelector() = "div.items-center div.w-full > a"
 
-    private fun popularAnimeFromElement(element: org.jsoup.nodes.Element) = SAnime.create().apply {
+    private fun popularAnimeFromElement(element: Element) = SAnime.create().apply {
         val href = element.attr("href")
         val showUrl = href.trimEnd('/').substringBeforeLast("-") + "/"
         val epNum = href.trimEnd('/').substringAfterLast("-")
@@ -108,15 +109,7 @@ abstract class Hstream :
 
         if (query.startsWith(PREFIX_SEARCH)) {
             val id = query.removePrefix(PREFIX_SEARCH)
-            val response = try {
-                client.get("$baseUrl/hentai/$id", headers)
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                if (e is eu.kanade.tachiyomi.network.HttpException && e.code == 404) {
-                    return AnimesPage(emptyList(), false)
-                }
-                throw e
-            }
+            val response = client.get("$baseUrl/hentai/$id", headers)
             return searchAnimeByIdParse(response)
         }
 
