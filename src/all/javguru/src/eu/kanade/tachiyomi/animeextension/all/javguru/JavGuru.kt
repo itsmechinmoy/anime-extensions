@@ -384,15 +384,24 @@ abstract class JavGuru :
 
         return when {
             listOf("javplaya", "javclan", "javlesbians", "ashleyhardat", "streamhg", "vide0").any { host.contains(it) } -> {
+                val label = when {
+                    host.contains("javclan") || host.contains("javplaya") -> "JavClan"
+                    host.contains("javlesbians") -> "JavLesbians"
+                    host.contains("streamhg") -> "StreamHG"
+                    host.contains("ashleyhardat") -> "AshleyHardAt"
+                    else -> "VidHide"
+                }
                 val videos = runCatching {
                     vidHideExtractor.videosFromUrl(hosterUrl) { quality ->
-                        "JavClan - $quality"
+                        "$label - $quality"
                     }
                 }.getOrDefault(emptyList())
 
                 videos.ifEmpty {
                     runCatching {
-                        streamWishExtractor.videosFromUrl(hosterUrl).map { video ->
+                        streamWishExtractor.videosFromUrl(hosterUrl) { quality ->
+                            "$label - $quality"
+                        }.map { video ->
                             val newHeaders = (video.headers ?: headers).newBuilder()
                                 .set("Referer", "$baseUrl/")
                                 .set("Origin", baseUrl)
@@ -406,39 +415,27 @@ abstract class JavGuru :
             }
 
             listOf("streamhihi", "lulustream").any { host.contains(it) } -> {
-                runCatching {
-                    LuluExtractor(client, headers).videosFromUrl(hosterUrl, "")
-                }.getOrDefault(emptyList())
+                LuluExtractor(client, headers).videosFromUrl(hosterUrl, "")
             }
 
             host.contains("streamtape") -> {
-                runCatching {
-                    streamTapeExtractor.videoFromUrl(hosterUrl).let(::listOfNotNull)
-                }.getOrDefault(emptyList())
+                streamTapeExtractor.videoFromUrl(hosterUrl).let(::listOfNotNull)
             }
 
             listOf("dood", "ds2play").any { host.contains(it) } -> {
-                runCatching {
-                    doodExtractor.videosFromUrl(hosterUrl)
-                }.getOrDefault(emptyList())
+                doodExtractor.videosFromUrl(hosterUrl)
             }
 
             listOf("mixdrop", "mixdroop").any { host.contains(it) } -> {
-                runCatching {
-                    mixDropExtractor.videoFromUrl(hosterUrl)
-                }.getOrDefault(emptyList())
+                mixDropExtractor.videoFromUrl(hosterUrl)
             }
 
             host.contains("maxstream") -> {
-                runCatching {
-                    maxStreamExtractor.videoFromUrl(hosterUrl)
-                }.getOrDefault(emptyList())
+                maxStreamExtractor.videoFromUrl(hosterUrl)
             }
 
             host.contains("emturbovid") -> {
-                runCatching {
-                    emTurboExtractor.getVideos(hosterUrl)
-                }.getOrDefault(emptyList())
+                emTurboExtractor.getVideos(hosterUrl)
             }
 
             else -> emptyList()
@@ -454,7 +451,7 @@ abstract class JavGuru :
 
         return sortedWith(
             compareByDescending<Video> {
-                listOf("javclan", "javplaya", "streamwish", "wishembed", "ashleyhardat").any { host ->
+                listOf("javclan", "javplaya", "javlesbians", "ashleyhardat", "streamwish", "wishembed").any { host ->
                     it.videoTitle.contains(host, ignoreCase = true) || it.videoUrl.contains(host, ignoreCase = true)
                 }
             }.thenByDescending {
