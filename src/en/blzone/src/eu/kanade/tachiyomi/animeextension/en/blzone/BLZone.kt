@@ -240,35 +240,12 @@ abstract class BLZone :
         url.contains("filemoon") -> filemoonExtractor.videosFromUrl(url, "FileMoon - ")
         url.contains("byseqekaho") -> filemoonExtractor.videosFromUrl(url, "Byse - ")
         url.contains("streamtape") -> streamtapeExtractor.videosFromUrl(url, "StreamTape")
-        url.contains("mixdrop") || url.contains("mxdrop") -> resolveMixdrop(url)
+        url.contains("mixdrop") || url.contains("mxdrop") -> mixDropExtractor.videosFromUrl(url, "en")
         url.contains("vgembed") -> vidGuardExtractor.videosFromUrl(url, "VidGuard")
         url.contains("mp4upload") -> mp4UploadExtractor.videosFromUrl(url, headers)
         url.contains("voe") -> voeExtractor.videosFromUrl(url, "Voe")
         url.contains("fsst.online") || url.contains("ruplay") -> resolveRuplay(url)
         else -> emptyList()
-    }
-
-    private fun resolveMixdrop(url: String): List<Video> {
-        val cleanUrl = url
-            .replace("mixdrop.co", "mixdrop.ag")
-            .replace("mixdrop.to", "mixdrop.ag")
-            .replace("mixdrop.sx", "mixdrop.ag")
-            .replace("mixdrop.bz", "mixdrop.ag")
-            .replace("mixdrop.ch", "mixdrop.ag")
-            .replace("/f/", "/e/")
-        val host = try {
-            cleanUrl.toHttpUrl().host
-        } catch (_: Exception) {
-            "mixdrop.ag"
-        }
-        val videos = mixDropExtractor.videosFromUrl(cleanUrl, "en", referer = "https://$host/")
-        if (videos.isNotEmpty()) return videos
-
-        if (cleanUrl.contains("mixdrop.ag")) {
-            val fallbackUrl = cleanUrl.replace("mixdrop.ag", "mixdrop.is")
-            return mixDropExtractor.videosFromUrl(fallbackUrl, "en", referer = "https://mixdrop.is/")
-        }
-        return emptyList()
     }
 
     private fun resolveRuplay(url: String): List<Video> {
