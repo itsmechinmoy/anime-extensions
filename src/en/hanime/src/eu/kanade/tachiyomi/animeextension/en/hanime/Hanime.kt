@@ -41,20 +41,18 @@ abstract class Hanime :
     override val supportsLatest = true
 
     override fun headersBuilder() = Headers.Builder()
-        .add("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36")
-        .add("Accept", "application/json")
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
         .add("Accept-Language", "en-US,en;q=0.9")
-        .add("content-type", "application/json")
         .add("Origin", "https://hanime.tv")
         .add("Referer", "https://hanime.tv/")
-        .add("sec-ch-ua", "\"Chromium\";v=\"130\", \"Google Chrome\";v=\"130\", \"Not?A_Brand\";v=\"99\"")
-        .add("sec-ch-ua-mobile", "?0")
-        .add("sec-ch-ua-platform", "\"Android\"")
 
     /** Headers for video stream requests (m3u8, segments, AES key). */
     private fun videoHeaders(): Headers = headers.newBuilder()
+        .set("Accept", "*/*")
         .set("Referer", "https://player.hanime.tv/")
         .set("Origin", "https://player.hanime.tv")
+        .removeAll("Content-Type")
+        .removeAll("content-type")
         .build()
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
@@ -457,6 +455,11 @@ abstract class Hanime :
      * 5. Expand each playlist into playable videos via PlaylistUtils
      */
     private suspend fun fetchHandshakeVideos(slug: String): List<Video> {
+        // Warm up the video page on hanime.tv to ensure cookies / CF clearance exist
+        runCatching {
+            client.newCall(GET("$baseUrl/videos/hentai/$slug", headers)).await().close()
+        }
+
         val signature = ensureSignatureProvider().getSignature()
         val payload = buildJsonObject {
             put("timestamp_unix", signature.time.toLong())
@@ -466,6 +469,8 @@ abstract class Hanime :
         val token = HandshakeCipher.seal(payload)
 
         val requestHeaders = headers.newBuilder()
+            .set("Accept", "application/json")
+            .set("Content-Type", "application/json")
             .set("x-signature-version", "web2")
             .set("x-signature", signature.signature)
             .set("x-time", signature.time)
