@@ -22,6 +22,7 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
+import kotlinx.coroutines.CancellationException
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -93,18 +94,20 @@ abstract class BLZone :
 
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
         val animePageUrl = if (page == 1) "$baseUrl/anime/" else "$baseUrl/anime/page/$page/"
-        val response = client.get(animePageUrl)
+        val response = client.get(animePageUrl, headers)
         val document = response.asJsoup()
         val animeList = document.select(".items.full .item.tvshows")
             .map { latestAnimeFromElement(it) }.toMutableList()
 
         if (page == 1) {
-            runCatching {
-                val doramaResponse = client.get("$baseUrl/dorama/")
-                doramaResponse.asJsoup()
+            try {
+                val doramaResponse = client.get("$baseUrl/dorama/", headers)
+                val doramaItems = doramaResponse.asJsoup()
                     .select(".items.full .item.tvshows")
                     .map { latestAnimeFromElement(it) }
-                    .let { animeList.addAll(it) }
+                animeList.addAll(doramaItems)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
             }
         }
         return AnimesPage(animeList, hasNextPage = hasNextPage(document))
