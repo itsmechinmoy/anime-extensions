@@ -307,10 +307,13 @@ abstract class Hanime :
             }
         }
 
+        // Deduplicate by series first so each series has equal probability when shuffled or sorted
+        val uniqueSeries = filtered.distinctBy { getTitle(it.name) }
+
         // Apply sorting
         val sorted = if (orderBy == "random") {
-            val hourlySeed = System.currentTimeMillis() / (60 * 60 * 1000L)
-            val shuffled = filtered.shuffled(kotlin.random.Random(hourlySeed))
+            val seed = if (cachedSearchHitsTimestamp != 0L) cachedSearchHitsTimestamp else 1337L
+            val shuffled = uniqueSeries.shuffled(kotlin.random.Random(seed))
             if (ordering == "asc") shuffled.reversed() else shuffled
         } else {
             val comparator: Comparator<HitsModel> = when (orderBy) {
@@ -321,17 +324,14 @@ abstract class Hanime :
                 "title_sortable" -> compareByDescending { it.name.lowercase(Locale.US) }
                 else -> compareByDescending { it.likes ?: 0L }
             }
-            if (ordering == "asc") filtered.sortedWith(comparator.reversed()) else filtered.sortedWith(comparator)
+            if (ordering == "asc") uniqueSeries.sortedWith(comparator.reversed()) else uniqueSeries.sortedWith(comparator)
         }
-
-        // Deduplicate by series BEFORE slicing so each series appears only once across pages
-        val uniqueSeries = sorted.distinctBy { getTitle(it.name) }
 
         // Paginate
         val fromIndex = (page - 1) * pageSize
-        val toIndex = minOf(fromIndex + pageSize, uniqueSeries.size)
-        val pageItems = if (fromIndex < uniqueSeries.size) uniqueSeries.subList(fromIndex, toIndex) else emptyList()
-        val hasNextPage = toIndex < uniqueSeries.size
+        val toIndex = minOf(fromIndex + pageSize, sorted.size)
+        val pageItems = if (fromIndex < sorted.size) sorted.subList(fromIndex, toIndex) else emptyList()
+        val hasNextPage = toIndex < sorted.size
 
         return AnimesPage(parseHitsToAnimeList(pageItems), hasNextPage)
     }
