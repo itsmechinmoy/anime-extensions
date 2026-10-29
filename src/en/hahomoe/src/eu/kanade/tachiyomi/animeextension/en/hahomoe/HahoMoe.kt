@@ -19,6 +19,7 @@ import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Element
@@ -98,16 +99,15 @@ abstract class HahoMoe :
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         var doc = client.get(baseUrl + anime.url, headers).asJsoup()
         return buildList {
-            do {
-                if (isNotEmpty()) {
-                    val url = doc.selectFirst(EPISODE_NEXT_PAGE_SELECTOR)?.absUrl("href") ?: break
-                    doc = client.get(url, headers).asJsoup()
-                }
-
+            while (true) {
                 doc.select("ul.episode-loop > li > a")
                     .map(::episodeFromElement)
                     .also(::addAll)
-            } while (doc.selectFirst(EPISODE_NEXT_PAGE_SELECTOR) != null)
+
+                val nextUrl = doc.selectFirst(EPISODE_NEXT_PAGE_SELECTOR)?.absUrl("href")
+                if (nextUrl == null || !isValidSourceHost(nextUrl)) break
+                doc = client.get(nextUrl, headers).asJsoup()
+            }
 
             sortByDescending { it.episode_number }
         }
@@ -132,11 +132,14 @@ abstract class HahoMoe :
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val document = client.get(baseUrl + episode.url, headers).asJsoup()
         val iframe = document.selectFirst("iframe")?.absUrl("src") ?: return emptyList()
+        if (!isValidHost(iframe)) return emptyList()
+
         val iframeHeaders = headersBuilder().set("Referer", baseUrl + episode.url).build()
         val iframeResponse = client.get(iframe, iframeHeaders).asJsoup()
 
-        val videos = iframeResponse.select("source").map { element ->
+        val videos = iframeResponse.select("source").mapNotNull { element ->
             val videoUrl = element.absUrl("src").ifBlank { element.attr("src") }
+            if (videoUrl.isBlank() || !isValidHost(videoUrl)) return@mapNotNull null
             val quality = element.attr("title").ifBlank { "Video" }
             Video(
                 videoUrl = videoUrl,
@@ -213,5 +216,25 @@ abstract class HahoMoe :
         private const val PREF_QUALITY_DEFAULT = "720p"
         private val PREF_QUALITY_ENTRIES = arrayOf("1080p", "720p", "480p", "360p")
         private val PREF_QUALITY_VALUES = PREF_QUALITY_ENTRIES
+
+        private fun isValidSourceHost(url: String): Boolean {
+            val parsed = url.toHttpUrlOrNull() ?: return false
+            val host = parsed.host
+            return host == "haho.moe" || host.endsWith(".haho.moe")
+        }
+
+        private fun isValidHost(url: String): Boolean {
+            val parsed = url.toHttpUrlOrNull() ?: return false
+            if (!parsed.isHttps) return false
+            val host = parsed.host
+            if (host.equals("localhost", ignoreCase = true) || host.endsWith(".local") || host.endsWith(".internal")) {
+                return false
+            }
+            return !PRIVATE_IP_REGEX.matches(host)
+        }
+
+        private val PRIVATE_IP_REGEX = Regex(
+            """^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.|169\.254\.|::1|[fF][cCdD]).*""",
+        )
     }
 }
