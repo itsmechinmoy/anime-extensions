@@ -4,14 +4,14 @@ plugins {
 
 yuzono {
     name = "Anitube"
-    versionCode = 30
+    versionCode = 31
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
     source {
         lang = "pt-BR"
-        baseUrl("https://www.anitube.vip") {
-            withCustom = true
+        baseUrl {
+            custom("https://www.anitube.vip")
         }
     }
 
